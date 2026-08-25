@@ -41,8 +41,9 @@ def analyze_python_file(path: str) -> str:
 
         lines.append(
             f"{symbol['type']}: "
-            f"{symbol['name']} "
-            f"(line {symbol['line']})"
+            f"{symbol['qualified_name']} "
+            f"(lines "
+            f"{symbol['line']}-{symbol['end_line']})"
         )
 
     return "\n".join(lines)
