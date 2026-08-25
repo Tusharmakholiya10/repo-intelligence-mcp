@@ -1,53 +1,77 @@
-from pathlib import Path
+import os
 
 from mcp.server.fastmcp import FastMCP
+
+from repomind.repository import Repository
 
 
 mcp = FastMCP("RepoMind")
 
 
-# For now, inspect the current working directory.
-# We will make this configurable later.
-REPO_PATH = Path.cwd()
+def get_repository() -> Repository:
+    """
+    Create a Repository instance from the configured
+    REPOMIND_REPO environment variable.
+    """
+
+    repo_path = os.getenv("REPOMIND_REPO", ".")
+
+    return Repository(repo_path)
 
 
 @mcp.tool()
 def list_files() -> str:
     """
-    List files and directories in the repository.
+    List files and directories in the configured repository.
 
-    Hidden Git files, virtual environments, and Python cache
-    directories are excluded.
+    Hidden Git files, virtual environments, caches,
+    and build directories are excluded.
     """
 
-    lines = []
+    repository = get_repository()
 
-    ignored_directories = {
-        ".git",
-        "venv",
-        ".venv",
-        "__pycache__",
-        ".pytest_cache",
-        "node_modules",
-    }
+    files = repository.list_files()
 
-    for path in sorted(REPO_PATH.rglob("*")):
-
-        # Ignore directories and files inside ignored directories
-        if any(part in ignored_directories for part in path.parts):
-            continue
-
-        relative_path = path.relative_to(REPO_PATH)
-
-        if path.is_dir():
-            lines.append(f"[DIR]  {relative_path}")
-        else:
-            lines.append(f"[FILE] {relative_path}")
-
-    if not lines:
+    if not files:
         return "Repository is empty."
 
-    return "\n".join(lines)
+    return "\n".join(files)
+
+
+@mcp.tool()
+def read_file(path: str) -> str:
+    """
+    Read a text file from the configured repository.
+
+    The path must be relative to the repository root.
+    """
+
+    repository = get_repository()
+
+    return repository.read_file(path)
+
+
+@mcp.tool()
+def search_code(
+    query: str,
+    max_results: int = 50
+) -> str:
+    """
+    Search for a text query across source files
+    in the configured repository.
+    """
+
+    repository = get_repository()
+
+    results = repository.search_code(
+        query,
+        max_results
+    )
+
+    if not results:
+        return f"No matches found for: {query}"
+
+    return "\n".join(results)
 
 
 if __name__ == "__main__":
