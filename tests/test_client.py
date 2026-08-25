@@ -100,5 +100,23 @@ async def main():
                     print(content.text)
 
 
+            print("\n" + "=" * 50)
+            print("Calling analyze_python_file()")
+            print("=" * 50)
+
+            result = await session.call_tool(
+                "analyze_python_file",
+                {
+                    "path": "src/repomind/repository.py"
+                }
+            )
+
+            print("\nAST analysis:\n")
+
+            for content in result.content:
+
+                if hasattr(content, "text"):
+                    print(content.text)
+
 if __name__ == "__main__":
     asyncio.run(main())

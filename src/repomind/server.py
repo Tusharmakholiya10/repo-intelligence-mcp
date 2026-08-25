@@ -3,7 +3,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 
 from repomind.repository import Repository
-
+from repomind.analyzer import PythonAnalyzer
 
 mcp = FastMCP("RepoMind")
 
@@ -18,6 +18,34 @@ def get_repository() -> Repository:
 
     return Repository(repo_path)
 
+
+@mcp.tool()
+def analyze_python_file(path: str) -> str:
+    """
+    Analyze a Python file and return its classes,
+    functions, async functions and imports.
+    """
+
+    repository = get_repository()
+
+    analyzer = PythonAnalyzer(repository.root)
+
+    symbols = analyzer.analyze_file(path)
+
+    if not symbols:
+        return f"No symbols found in {path}"
+
+    lines = []
+
+    for symbol in symbols:
+
+        lines.append(
+            f"{symbol['type']}: "
+            f"{symbol['name']} "
+            f"(line {symbol['line']})"
+        )
+
+    return "\n".join(lines)
 
 @mcp.tool()
 def list_files() -> str:
