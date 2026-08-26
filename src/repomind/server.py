@@ -102,6 +102,44 @@ def search_code(
 
     return "\n".join(results)
 
+@mcp.tool()
+def search_symbols(
+    query: str,
+    max_results: int = 100,
+) -> str:
+    """
+    Search for classes, functions, methods and imports
+    across the entire Python repository.
+    """
+
+    repository = get_repository()
+
+    analyzer = PythonAnalyzer(
+        repository.root
+    )
+
+    symbols = analyzer.search_symbols(
+        query,
+        max_results
+    )
+
+    if not symbols:
+        return f"No symbols found for: {query}"
+
+    lines = []
+
+    for symbol in symbols:
+
+        lines.append(
+            f"{symbol['file']}: "
+            f"{symbol['type']} "
+            f"{symbol['qualified_name']} "
+            f"(lines "
+            f"{symbol['line']}-"
+            f"{symbol['end_line']})"
+        )
+
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     mcp.run()

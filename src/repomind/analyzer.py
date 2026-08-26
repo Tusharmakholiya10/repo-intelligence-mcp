@@ -197,3 +197,70 @@ class PythonAnalyzer:
             )
 
         return path
+
+        def search_symbols(
+            self,
+            query: str,
+            max_results: int = 100,
+        ) -> list[dict]:
+            """
+            Search for symbols across all Python files
+            in the repository.
+            """
+
+            if not query.strip():
+                raise ValueError(
+                    "Symbol search query cannot be empty."
+                )
+
+            results = []
+
+            ignored_directories = {
+                ".git",
+                "venv",
+                ".venv",
+                "__pycache__",
+                ".pytest_cache",
+                "node_modules",
+                "dist",
+                "build",
+            }
+
+            for path in sorted(self.repository_root.rglob("*.py")):
+
+                if any(
+                    part in ignored_directories
+                    for part in path.parts
+                ):
+                    continue
+
+                relative_path = path.relative_to(
+                    self.repository_root
+                )
+
+                try:
+                    symbols = self.analyze_file(
+                        str(relative_path)
+                    )
+                except ValueError:
+                    continue
+
+                for symbol in symbols:
+
+                    if query.lower() in (
+                        symbol["name"].lower()
+                    ) or query.lower() in (
+                        symbol["qualified_name"].lower()
+                    ):
+
+                        result = {
+                            "file": str(relative_path),
+                            **symbol,
+                        }
+
+                        results.append(result)
+
+                        if len(results) >= max_results:
+                            return results
+
+            return results
