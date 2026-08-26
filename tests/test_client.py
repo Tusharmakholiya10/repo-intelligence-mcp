@@ -118,7 +118,7 @@ async def main():
                 if hasattr(content, "text"):
                     print(content.text)
 
-                    
+
             print("\n" + "=" * 50)
             print("Calling search_symbols()")
             print("=" * 50)
@@ -138,5 +138,31 @@ async def main():
                 if hasattr(content, "text"):
                     print(content.text)
 
+            print("\n" + "=" * 50)
+            print("Calling index_repository()")
+            print("=" * 50)
+
+            result = await session.call_tool(
+                "index_repository",
+                {}
+            )
+
+            for content in result.content:
+
+                if hasattr(content, "text"):
+                    print(content.text)
+            print("\n" + "=" * 50)
+            print("Calling index_stats()")
+            print("=" * 50)
+
+            result = await session.call_tool(
+                "index_stats",
+                {}
+            )
+
+            for content in result.content:
+
+                if hasattr(content, "text"):
+                    print(content.text)
 if __name__ == "__main__":
     asyncio.run(main())

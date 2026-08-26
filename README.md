@@ -31,14 +31,16 @@ Git Repository
 
 ## Roadmap
 
-- [ ] Repository configuration
-- [ ] File reading
-- [ ] Code search
-- [ ] AST-based symbol search
+- [x] Repository configuration
+- [x] File reading
+- [x] Code search
+- [x] AST-based symbol search
+- [x] Repository-wide symbol search
+- [x] SQLite code index
+- [x] Indexed symbol search
 - [ ] Find usages
 - [ ] Dependency graph
 - [ ] Git intelligence
-- [ ] SQLite indexing
 - [ ] Incremental indexing
 - [ ] AI agent integration
 - [ ] Semantic code search

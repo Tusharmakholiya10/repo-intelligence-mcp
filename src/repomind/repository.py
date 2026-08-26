@@ -6,6 +6,7 @@ class Repository:
 
     IGNORED_DIRECTORIES = {
         ".git",
+        ".repomind",
         "venv",
         ".venv",
         "__pycache__",

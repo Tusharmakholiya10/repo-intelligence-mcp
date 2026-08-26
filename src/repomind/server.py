@@ -4,6 +4,8 @@ from mcp.server.fastmcp import FastMCP
 
 from repomind.repository import Repository
 from repomind.analyzer import PythonAnalyzer
+from repomind.indexer import CodeIndexer
+from datetime import datetime
 
 mcp = FastMCP("RepoMind")
 
@@ -108,30 +110,33 @@ def search_symbols(
     max_results: int = 100,
 ) -> str:
     """
-    Search for classes, functions, methods and imports
-    across the entire Python repository.
+    Search the SQLite code index for classes,
+    functions, methods and imports.
     """
 
     repository = get_repository()
 
-    analyzer = PythonAnalyzer(
+    indexer = CodeIndexer(
         repository.root
     )
 
-    symbols = analyzer.search_symbols(
+    results = indexer.search_symbols(
         query,
-        max_results
+        max_results,
     )
 
-    if not symbols:
-        return f"No symbols found for: {query}"
+    if not results:
+        return (
+            f"No indexed symbols found for: {query}\n"
+            "Run index_repository() first."
+        )
 
     lines = []
 
-    for symbol in symbols:
+    for symbol in results:
 
         lines.append(
-            f"{symbol['file']}: "
+            f"{symbol['path']}: "
             f"{symbol['type']} "
             f"{symbol['qualified_name']} "
             f"(lines "
@@ -140,6 +145,87 @@ def search_symbols(
         )
 
     return "\n".join(lines)
+
+@mcp.tool()
+def index_repository() -> str:
+    """
+    Build or update the SQLite code index
+    for the configured repository.
+    """
+
+    repository = get_repository()
+
+    analyzer = PythonAnalyzer(
+        repository.root
+    )
+
+    indexer = CodeIndexer(
+        repository.root
+    )
+
+    indexed_files = 0
+    indexed_symbols = 0
+
+    for path in repository.root.rglob("*.py"):
+
+        if repository._is_ignored(path):
+            continue
+
+        relative_path = path.relative_to(
+            repository.root
+        )
+
+        try:
+            symbols = analyzer.analyze_file(
+                str(relative_path)
+            )
+        except ValueError:
+            continue
+
+        stat = path.stat()
+
+        modified_time = datetime.fromtimestamp(
+            stat.st_mtime
+        ).isoformat()
+
+        indexer.index_file(
+            relative_path=str(relative_path),
+            language="python",
+            size=stat.st_size,
+            modified_time=modified_time,
+            symbols=symbols,
+        )
+
+        indexed_files += 1
+        indexed_symbols += len(symbols)
+
+    return (
+        f"Repository indexed successfully.\n"
+        f"Files indexed: {indexed_files}\n"
+        f"Symbols indexed: {indexed_symbols}\n"
+        f"Database: {indexer.database_path}"
+    )
+
+@mcp.tool()
+def index_stats() -> str:
+    """
+    Return statistics about the RepoMind code index.
+    """
+
+    repository = get_repository()
+
+    indexer = CodeIndexer(
+        repository.root
+    )
+
+    stats = indexer.get_stats()
+
+    return (
+        f"Indexed files: {stats['files']}\n"
+        f"Indexed symbols: {stats['symbols']}\n"
+        f"Indexed references: {stats['references']}\n"
+        f"Database: {stats['database']}"
+    )
 
 if __name__ == "__main__":
     mcp.run()
