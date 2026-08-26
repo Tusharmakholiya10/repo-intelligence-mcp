@@ -164,5 +164,39 @@ async def main():
 
                 if hasattr(content, "text"):
                     print(content.text)
+
+            print("\n" + "=" * 50)
+            print("Calling find_usages()")
+            print("=" * 50)
+
+            result = await session.call_tool(
+                "find_usages",
+                {
+                    "symbol_name": "get_repository",  
+                    #  "symbol_name": "analyze_file", 
+                    # "symbol_name" : "read_file",
+                    "max_results": 20,
+                },
+            )
+
+            for content in result.content:
+                if hasattr(content, "text"):
+                    print(content.text)
+
+            print("\n" + "=" * 50)
+            print("Calling get_dependencies()")
+            print("=" * 50)
+
+            result = await session.call_tool(
+                "get_dependencies",
+                {
+                    "relative_path": "src/repomind/server.py",
+                    "max_results": 20,
+                },
+            )
+
+            for content in result.content:
+                if hasattr(content, "text"):
+                    print(content.text)
 if __name__ == "__main__":
     asyncio.run(main())

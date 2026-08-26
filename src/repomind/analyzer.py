@@ -268,5 +268,258 @@ class PythonAnalyzer:
             )
 
         return path
+    
+    def find_references(
+        self,
+        relative_path: str,
+    ) -> list[dict]:
+        """
+        Extract meaningful symbol references from a Python file.
+        """
 
-        
+        path = self._resolve_python_file(relative_path)
+
+        source = path.read_text(
+            encoding="utf-8"
+        )
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise ValueError(
+                f"Could not parse {relative_path}: {exc}"
+            )
+
+        references = []
+
+        for node in ast.walk(tree):
+
+            # Function/class calls:
+            #
+            # get_repository()
+            # Repository(...)
+            #
+            if isinstance(node, ast.Call):
+
+                target = node.func
+
+                if isinstance(target, ast.Name):
+
+                    references.append({
+                        "symbol_name": target.id,
+                        "line": target.lineno,
+                        "reference_type": "call",
+                    })
+
+                elif isinstance(target, ast.Attribute):
+
+                    references.append({
+                        "symbol_name": target.attr,
+                        "line": target.lineno,
+                        "reference_type": "method_call",
+                    })
+
+            # Imports:
+            #
+            # from repository import Repository
+            #
+            elif isinstance(node, ast.Import):
+
+                for alias in node.names:
+
+                    references.append({
+                        "symbol_name": alias.name,
+                        "line": node.lineno,
+                        "reference_type": "import",
+                    })
+
+            elif isinstance(node, ast.ImportFrom):
+
+                for alias in node.names:
+
+                    references.append({
+                        "symbol_name": alias.name,
+                        "line": node.lineno,
+                        "reference_type": "import",
+                    })
+
+            # Attribute access:
+            #
+            # repository.root
+            #
+            elif isinstance(node, ast.Attribute):
+
+                # Avoid duplicating attributes that were already
+                # recorded as method calls.
+                if isinstance(node.ctx, ast.Load):
+
+                    parent_is_call = False
+
+                    for parent in ast.walk(tree):
+
+                        if (
+                            isinstance(parent, ast.Call)
+                            and parent.func is node
+                        ):
+                            parent_is_call = True
+                            break
+
+                    if not parent_is_call:
+
+                        references.append({
+                            "symbol_name": node.attr,
+                            "line": node.lineno,
+                            "reference_type": "attribute",
+                        })
+
+            # Direct symbol references:
+            #
+            # Repository
+            # analyzer
+            #
+            elif isinstance(node, ast.Name):
+
+                # Skip names that are function calls.
+                parent_is_call = False
+
+                for parent in ast.walk(tree):
+
+                    if (
+                        isinstance(parent, ast.Call)
+                        and parent.func is node
+                    ):
+                        parent_is_call = True
+                        break
+
+                if not parent_is_call:
+
+                    references.append({
+                        "symbol_name": node.id,
+                        "line": node.lineno,
+                        "reference_type": "reference",
+                    })
+
+        return references
+    
+    def find_imports(
+        self,
+        relative_path: str,
+    ) -> list[dict]:
+        """
+        Extract Python imports from a file.
+        """
+
+        path = self._resolve_python_file(
+            relative_path
+        )
+
+        source = path.read_text(
+            encoding="utf-8"
+        )
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise ValueError(
+                f"Could not parse {relative_path}: {exc}"
+            )
+
+        imports = []
+
+        for node in ast.walk(tree):
+
+            if isinstance(node, ast.Import):
+
+                for alias in node.names:
+
+                    imports.append({
+                        "module": alias.name,
+                        "line": node.lineno,
+                        "type": "import",
+                    })
+
+            elif isinstance(node, ast.ImportFrom):
+
+                if node.module:
+
+                    imports.append({
+                        "module": node.module,
+                        "line": node.lineno,
+                        "type": "from_import",
+                    })
+
+        return imports
+
+    def resolve_import(
+        self,
+        module_name: str,
+    ) -> str | None:
+        """
+        Resolve a Python module name to a file
+        inside the configured repository.
+        """
+
+        parts = module_name.split(".")
+        relative = Path(*parts)
+
+        candidates = [
+            # Standard repository layout
+            self.repository_root / relative.with_suffix(".py"),
+
+            # Standard package layout
+            self.repository_root / relative / "__init__.py",
+
+            # src/ layout
+            self.repository_root
+            / "src"
+            / relative.with_suffix(".py"),
+
+            # src/ package layout
+            self.repository_root
+            / "src"
+            / relative
+            / "__init__.py",
+        ]
+
+        for candidate in candidates:
+
+            if candidate.exists():
+
+                return str(
+                    candidate.relative_to(
+                        self.repository_root
+                    )
+                ).replace("\\", "/")
+
+        return None
+
+    def find_dependencies(
+        self,
+        relative_path: str,
+    ) -> list[dict]:
+        """
+        Find local repository files imported by a Python file.
+        """
+
+        imports = self.find_imports(
+            relative_path
+        )
+
+        dependencies = []
+
+        for item in imports:
+
+            target_file = self.resolve_import(
+                item["module"]
+            )
+
+            if target_file is None:
+                continue
+
+            dependencies.append({
+                "target_file": target_file,
+                "line": item["line"],
+                "type": item["type"],
+            })
+
+        return dependencies

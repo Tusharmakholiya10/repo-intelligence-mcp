@@ -166,6 +166,12 @@ def index_repository() -> str:
     indexed_files = 0
     indexed_symbols = 0
 
+    python_files = []
+
+    # --------------------------------------------------
+    # PASS 1: Index all Python files and their symbols
+    # --------------------------------------------------
+
     for path in repository.root.rglob("*.py"):
 
         if repository._is_ignored(path):
@@ -173,7 +179,7 @@ def index_repository() -> str:
 
         relative_path = path.relative_to(
             repository.root
-        )
+        ).as_posix()
 
         try:
             symbols = analyzer.analyze_file(
@@ -196,8 +202,38 @@ def index_repository() -> str:
             symbols=symbols,
         )
 
+        python_files.append(relative_path)
+
         indexed_files += 1
         indexed_symbols += len(symbols)
+
+    # --------------------------------------------------
+    # PASS 2: Index references and dependencies
+    # --------------------------------------------------
+
+    for relative_path in python_files:
+
+        try:
+            references = analyzer.find_references(
+                str(relative_path)
+            )
+
+            dependencies = analyzer.find_dependencies(
+                str(relative_path)
+            )
+
+        except ValueError:
+            continue
+
+        indexer.index_references(
+            relative_path=str(relative_path),
+            references=references,
+        )
+
+        indexer.index_dependencies(
+            relative_path=str(relative_path),
+            dependencies=dependencies,
+        )
 
     return (
         f"Repository indexed successfully.\n"
@@ -226,6 +262,86 @@ def index_stats() -> str:
         f"Indexed references: {stats['references']}\n"
         f"Database: {stats['database']}"
     )
+
+@mcp.tool()
+def find_usages(
+    symbol_name: str,
+    max_results: int = 100,
+) -> str:
+    """
+    Find references to a symbol using the
+    indexed repository.
+    """
+
+    repository = get_repository()
+
+    indexer = CodeIndexer(
+        repository.root
+    )
+
+    usages = indexer.find_usages(
+        symbol_name,
+        max_results,
+    )
+
+    if not usages:
+        return (
+            f"No usages found for: {symbol_name}\n"
+            "Run index_repository() first."
+        )
+
+    lines = []
+
+    for usage in usages:
+
+        lines.append(
+            f"{usage['path']}:"
+            f"{usage['line']} "
+            f"[{usage['reference_type']}] "
+            f"{usage['symbol_name']}"
+        )
+
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_dependencies(
+    relative_path: str,
+    max_results: int = 100,
+) -> str:
+    """
+    Return local repository files that a source
+    file depends on.
+    """
+
+    repository = get_repository()
+
+    indexer = CodeIndexer(
+        repository.root
+    )
+
+    dependencies = indexer.get_dependencies(
+        relative_path,
+        max_results,
+    )
+
+    if not dependencies:
+        return (
+            f"No local dependencies found for: "
+            f"{relative_path}"
+        )
+
+    lines = []
+
+    for dependency in dependencies:
+
+        lines.append(
+            f"{relative_path} -> "
+            f"{dependency['path']} "
+            f"[{dependency['dependency_type']}] "
+            f"line {dependency['line']}"
+        )
+
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     mcp.run()

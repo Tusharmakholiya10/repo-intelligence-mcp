@@ -99,6 +99,29 @@ class CodeIndexer:
                 """
             )
 
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dependencies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_file_id INTEGER NOT NULL,
+                    target_file_id INTEGER NOT NULL,
+                    dependency_type TEXT NOT NULL,
+                    line INTEGER,
+                    UNIQUE(
+                        source_file_id,
+                        target_file_id,
+                        dependency_type,
+                        line
+                    ),
+                    FOREIGN KEY(source_file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
     def index_file(
         self,
         relative_path: str,
@@ -242,3 +265,199 @@ class CodeIndexer:
             "references": reference_count,
             "database": str(self.database_path),
         }
+
+    def index_references(
+        self,
+        relative_path: str,
+        references: list[dict],
+    ):
+        """Replace references for a file."""
+
+        with self._connect() as connection:
+
+            file_row = connection.execute(
+                """
+                SELECT id
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            if file_row is None:
+                raise ValueError(
+                    f"File is not indexed: {relative_path}"
+                )
+
+            file_id = file_row["id"]
+
+            connection.execute(
+                """
+                DELETE FROM symbol_references
+                WHERE file_id = ?
+                """,
+                (file_id,),
+            )
+
+            for reference in references:
+
+                connection.execute(
+                    """
+                    INSERT INTO symbol_references (
+                        file_id,
+                        symbol_name,
+                        line,
+                        reference_type
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        reference["symbol_name"],
+                        reference["line"],
+                        reference["reference_type"],
+                    ),
+                )
+
+            connection.commit()
+
+    def find_usages(
+        self,
+        symbol_name: str,
+        max_results: int = 100,
+    ) -> list[dict]:
+        """Find indexed references to a symbol."""
+
+        with self._connect() as connection:
+
+            rows = connection.execute(
+                """
+                SELECT
+                    files.path,
+                    symbol_references.symbol_name,
+                    symbol_references.line,
+                    symbol_references.reference_type
+                FROM symbol_references
+                JOIN files
+                    ON symbol_references.file_id = files.id
+                WHERE symbol_references.symbol_name = ?
+                ORDER BY files.path,
+                        symbol_references.line
+                LIMIT ?
+                """,
+                (
+                    symbol_name,
+                    max_results,
+                ),
+            ).fetchall()
+
+            return [
+                dict(row)
+                for row in rows
+            ]
+
+    def index_dependencies(
+        self,
+        relative_path: str,
+        dependencies: list[dict],
+    ):
+        """
+        Store local file dependencies for a source file.
+        """
+
+        with self._connect() as connection:
+
+            source_row = connection.execute(
+                """
+                SELECT id
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            if source_row is None:
+                raise ValueError(
+                    f"File is not indexed: {relative_path}"
+                )
+
+            source_id = source_row["id"]
+
+            connection.execute(
+                """
+                DELETE FROM dependencies
+                WHERE source_file_id = ?
+                """,
+                (source_id,),
+            )
+
+            for dependency in dependencies:
+
+                target_row = connection.execute(
+                    """
+                    SELECT id
+                    FROM files
+                    WHERE path = ?
+                    """,
+                    (dependency["target_file"],),
+                ).fetchone()
+
+                if target_row is None:
+                    continue
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO dependencies (
+                        source_file_id,
+                        target_file_id,
+                        dependency_type,
+                        line
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        source_id,
+                        target_row["id"],
+                        dependency["type"],
+                        dependency["line"],
+                    ),
+                )
+
+            connection.commit()
+
+    def get_dependencies(
+        self,
+        relative_path: str,
+        max_results: int = 100,
+    ) -> list[dict]:
+        """
+        Return files that a source file depends on.
+        """
+
+        with self._connect() as connection:
+
+            rows = connection.execute(
+                """
+                SELECT
+                    target.path,
+                    dependencies.dependency_type,
+                    dependencies.line
+                FROM dependencies
+                JOIN files AS source
+                    ON dependencies.source_file_id = source.id
+                JOIN files AS target
+                    ON dependencies.target_file_id = target.id
+                WHERE source.path = ?
+                ORDER BY dependencies.line
+                LIMIT ?
+                """,
+                (
+                    relative_path,
+                    max_results,
+                ),
+            ).fetchall()
+
+            return [
+                dict(row)
+                for row in rows
+            ]

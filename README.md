@@ -38,8 +38,8 @@ Git Repository
 - [x] Repository-wide symbol search
 - [x] SQLite code index
 - [x] Indexed symbol search
-- [ ] Find usages
-- [ ] Dependency graph
+- [x] Find usages
+- [x] Dependency graph
 - [ ] Git intelligence
 - [ ] Incremental indexing
 - [ ] AI agent integration
