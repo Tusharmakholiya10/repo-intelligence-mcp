@@ -5,6 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from repomind.repository import Repository
 from repomind.analyzer import PythonAnalyzer
 from repomind.indexer import CodeIndexer
+from repomind.git import GitManager
 from datetime import datetime
 
 mcp = FastMCP("RepoMind")
@@ -20,6 +21,76 @@ def get_repository() -> Repository:
 
     return Repository(repo_path)
 
+@mcp.tool()
+def get_git_history(
+    max_results: int = 10,
+) -> str:
+    """
+    Return recent Git commits from the repository.
+    """
+
+    repository = get_repository()
+
+    git = GitManager(repository.root)
+
+    try:
+        history = git.get_history(max_results)
+
+    except Exception as error:
+        return f"Git history error: {error}"
+
+    if not history:
+        return "No Git history found."
+
+    return history
+
+@mcp.tool()
+def get_git_commit(
+    commit_hash: str,
+) -> str:
+    """
+    Return details and changed files for a Git commit.
+    """
+
+    repository = get_repository()
+
+    git = GitManager(repository.root)
+
+    try:
+        return git.get_commit(commit_hash)
+
+    except Exception as error:
+        return f"Git commit error: {error}"
+
+@mcp.tool()
+def get_git_file_history(
+    relative_path: str,
+    max_results: int = 10,
+) -> str:
+    """
+    Return Git history for a specific repository file.
+    """
+
+    repository = get_repository()
+
+    git = GitManager(repository.root)
+
+    try:
+        history = git.get_file_history(
+            relative_path,
+            max_results,
+        )
+
+    except Exception as error:
+        return f"Git file history error: {error}"
+
+    if not history:
+        return (
+            f"No Git history found for: "
+            f"{relative_path}"
+        )
+
+    return history
 
 @mcp.tool()
 def analyze_python_file(path: str) -> str:

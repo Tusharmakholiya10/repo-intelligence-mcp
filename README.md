@@ -40,7 +40,7 @@ Git Repository
 - [x] Indexed symbol search
 - [x] Find usages
 - [x] Dependency graph
-- [ ] Git intelligence
+- [x] Git intelligence
 - [ ] Incremental indexing
 - [ ] AI agent integration
 - [ ] Semantic code search
