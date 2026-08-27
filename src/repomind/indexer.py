@@ -1,6 +1,5 @@
 import sqlite3
 from pathlib import Path
-from datetime import datetime
 
 
 class CodeIndexer:
@@ -38,7 +37,24 @@ class CodeIndexer:
 
         connection.row_factory = sqlite3.Row
 
+        # Required for ON DELETE CASCADE to work in SQLite.
+        connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
         return connection
+
+    def _normalize_path(self, relative_path: str) -> str:
+        """
+        Normalize repository-relative paths.
+
+        SQLite stores paths using forward slashes so that
+        Windows and Unix-style paths are treated consistently.
+        """
+
+        return str(
+            Path(relative_path)
+        ).replace("\\", "/")
 
     def _initialize_database(self):
         """Create database tables if they do not exist."""
@@ -96,32 +112,40 @@ class CodeIndexer:
                 CREATE INDEX IF NOT EXISTS
                     idx_references_symbol
                     ON symbol_references(symbol_name);
-                """
-            )
 
-            connection.execute(
-                """
                 CREATE TABLE IF NOT EXISTS dependencies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     source_file_id INTEGER NOT NULL,
                     target_file_id INTEGER NOT NULL,
                     dependency_type TEXT NOT NULL,
                     line INTEGER,
+
                     UNIQUE(
                         source_file_id,
                         target_file_id,
                         dependency_type,
                         line
                     ),
+
                     FOREIGN KEY(source_file_id)
                         REFERENCES files(id)
                         ON DELETE CASCADE,
+
                     FOREIGN KEY(target_file_id)
                         REFERENCES files(id)
                         ON DELETE CASCADE
-                )
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_dependencies_source
+                    ON dependencies(source_file_id);
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_dependencies_target
+                    ON dependencies(target_file_id);
                 """
             )
+
     def index_file(
         self,
         relative_path: str,
@@ -132,9 +156,13 @@ class CodeIndexer:
     ):
         """Insert or replace a file and its symbols."""
 
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
         with self._connect() as connection:
 
-            cursor = connection.execute(
+            connection.execute(
                 """
                 INSERT INTO files (
                     path,
@@ -203,6 +231,46 @@ class CodeIndexer:
 
             connection.commit()
 
+    def needs_reindex(
+        self,
+        relative_path: str,
+        size: int,
+        modified_time: str,
+    ) -> bool:
+        """
+        Return True if a file is new or has changed
+        since it was last indexed.
+        """
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
+        with self._connect() as connection:
+
+            row = connection.execute(
+                """
+                SELECT size, modified_time
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            # File is not indexed yet.
+            if row is None:
+                return True
+
+            # File size changed.
+            if row["size"] != size:
+                return True
+
+            # Modification time changed.
+            if row["modified_time"] != modified_time:
+                return True
+
+            return False
+
     def search_symbols(
         self,
         query: str,
@@ -259,10 +327,15 @@ class CodeIndexer:
                 "SELECT COUNT(*) FROM symbol_references"
             ).fetchone()[0]
 
+            dependency_count = connection.execute(
+                "SELECT COUNT(*) FROM dependencies"
+            ).fetchone()[0]
+
         return {
             "files": file_count,
             "symbols": symbol_count,
             "references": reference_count,
+            "dependencies": dependency_count,
             "database": str(self.database_path),
         }
 
@@ -272,6 +345,10 @@ class CodeIndexer:
         references: list[dict],
     ):
         """Replace references for a file."""
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
 
         with self._connect() as connection:
 
@@ -341,8 +418,9 @@ class CodeIndexer:
                 JOIN files
                     ON symbol_references.file_id = files.id
                 WHERE symbol_references.symbol_name = ?
-                ORDER BY files.path,
-                        symbol_references.line
+                ORDER BY
+                    files.path,
+                    symbol_references.line
                 LIMIT ?
                 """,
                 (
@@ -364,6 +442,10 @@ class CodeIndexer:
         """
         Store local file dependencies for a source file.
         """
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
 
         with self._connect() as connection:
 
@@ -393,13 +475,17 @@ class CodeIndexer:
 
             for dependency in dependencies:
 
+                target_file = self._normalize_path(
+                    dependency["target_file"]
+                )
+
                 target_row = connection.execute(
                     """
                     SELECT id
                     FROM files
                     WHERE path = ?
                     """,
-                    (dependency["target_file"],),
+                    (target_file,),
                 ).fetchone()
 
                 if target_row is None:
@@ -433,6 +519,10 @@ class CodeIndexer:
         """
         Return files that a source file depends on.
         """
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
 
         with self._connect() as connection:
 

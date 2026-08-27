@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
 
@@ -6,7 +7,7 @@ from repomind.repository import Repository
 from repomind.analyzer import PythonAnalyzer
 from repomind.indexer import CodeIndexer
 from repomind.git import GitManager
-from datetime import datetime
+
 
 mcp = FastMCP("RepoMind")
 
@@ -17,9 +18,13 @@ def get_repository() -> Repository:
     REPOMIND_REPO environment variable.
     """
 
-    repo_path = os.getenv("REPOMIND_REPO", ".")
+    repo_path = os.getenv(
+        "REPOMIND_REPO",
+        ".",
+    )
 
     return Repository(repo_path)
+
 
 @mcp.tool()
 def get_git_history(
@@ -34,7 +39,9 @@ def get_git_history(
     git = GitManager(repository.root)
 
     try:
-        history = git.get_history(max_results)
+        history = git.get_history(
+            max_results
+        )
 
     except Exception as error:
         return f"Git history error: {error}"
@@ -43,6 +50,7 @@ def get_git_history(
         return "No Git history found."
 
     return history
+
 
 @mcp.tool()
 def get_git_commit(
@@ -57,10 +65,13 @@ def get_git_commit(
     git = GitManager(repository.root)
 
     try:
-        return git.get_commit(commit_hash)
+        return git.get_commit(
+            commit_hash
+        )
 
     except Exception as error:
         return f"Git commit error: {error}"
+
 
 @mcp.tool()
 def get_git_file_history(
@@ -92,8 +103,11 @@ def get_git_file_history(
 
     return history
 
+
 @mcp.tool()
-def analyze_python_file(path: str) -> str:
+def analyze_python_file(
+    path: str,
+) -> str:
     """
     Analyze a Python file and return its classes,
     functions, async functions and imports.
@@ -101,12 +115,16 @@ def analyze_python_file(path: str) -> str:
 
     repository = get_repository()
 
-    analyzer = PythonAnalyzer(repository.root)
+    analyzer = PythonAnalyzer(
+        repository.root
+    )
 
     symbols = analyzer.analyze_file(path)
 
     if not symbols:
-        return f"No symbols found in {path}"
+        return (
+            f"No symbols found in {path}"
+        )
 
     lines = []
 
@@ -116,10 +134,12 @@ def analyze_python_file(path: str) -> str:
             f"{symbol['type']}: "
             f"{symbol['qualified_name']} "
             f"(lines "
-            f"{symbol['line']}-{symbol['end_line']})"
+            f"{symbol['line']}-"
+            f"{symbol['end_line']})"
         )
 
     return "\n".join(lines)
+
 
 @mcp.tool()
 def list_files() -> str:
@@ -141,7 +161,9 @@ def list_files() -> str:
 
 
 @mcp.tool()
-def read_file(path: str) -> str:
+def read_file(
+    path: str,
+) -> str:
     """
     Read a text file from the configured repository.
 
@@ -156,7 +178,7 @@ def read_file(path: str) -> str:
 @mcp.tool()
 def search_code(
     query: str,
-    max_results: int = 50
+    max_results: int = 50,
 ) -> str:
     """
     Search for a text query across source files
@@ -167,13 +189,16 @@ def search_code(
 
     results = repository.search_code(
         query,
-        max_results
+        max_results,
     )
 
     if not results:
-        return f"No matches found for: {query}"
+        return (
+            f"No matches found for: {query}"
+        )
 
     return "\n".join(results)
+
 
 @mcp.tool()
 def search_symbols(
@@ -217,11 +242,14 @@ def search_symbols(
 
     return "\n".join(lines)
 
+
 @mcp.tool()
 def index_repository() -> str:
     """
-    Build or update the SQLite code index
-    for the configured repository.
+    Build or update the SQLite code index for the configured repository.
+
+    Only new or modified files are analyzed.
+    Deleted files are removed from the index.
     """
 
     repository = get_repository()
@@ -236,12 +264,10 @@ def index_repository() -> str:
 
     indexed_files = 0
     indexed_symbols = 0
+    skipped_files = 0
+    deleted_files = 0
 
-    python_files = []
-
-    # --------------------------------------------------
-    # PASS 1: Index all Python files and their symbols
-    # --------------------------------------------------
+    current_files = set()
 
     for path in repository.root.rglob("*.py"):
 
@@ -250,14 +276,17 @@ def index_repository() -> str:
 
         relative_path = path.relative_to(
             repository.root
-        ).as_posix()
+        )
 
-        try:
-            symbols = analyzer.analyze_file(
-                str(relative_path)
-            )
-        except ValueError:
-            continue
+        # Always store repository paths using
+        # forward slashes for cross-platform consistency.
+        relative_path_str = str(
+            relative_path
+        ).replace("\\", "/")
+
+        current_files.add(
+            relative_path_str
+        )
 
         stat = path.stat()
 
@@ -265,53 +294,96 @@ def index_repository() -> str:
             stat.st_mtime
         ).isoformat()
 
+        # Skip files that have not changed.
+        if not indexer.needs_reindex(
+            relative_path_str,
+            stat.st_size,
+            modified_time,
+        ):
+            skipped_files += 1
+            continue
+
+        try:
+            symbols = analyzer.analyze_file(
+                relative_path_str
+            )
+
+            references = analyzer.find_references(
+                relative_path_str
+            )
+
+            dependencies = analyzer.find_dependencies(
+                relative_path_str
+            )
+
+        except ValueError:
+            continue
+
         indexer.index_file(
-            relative_path=str(relative_path),
+            relative_path=relative_path_str,
             language="python",
             size=stat.st_size,
             modified_time=modified_time,
             symbols=symbols,
         )
 
-        python_files.append(relative_path)
-
-        indexed_files += 1
-        indexed_symbols += len(symbols)
-
-    # --------------------------------------------------
-    # PASS 2: Index references and dependencies
-    # --------------------------------------------------
-
-    for relative_path in python_files:
-
-        try:
-            references = analyzer.find_references(
-                str(relative_path)
-            )
-
-            dependencies = analyzer.find_dependencies(
-                str(relative_path)
-            )
-
-        except ValueError:
-            continue
-
         indexer.index_references(
-            relative_path=str(relative_path),
+            relative_path=relative_path_str,
             references=references,
         )
 
         indexer.index_dependencies(
-            relative_path=str(relative_path),
+            relative_path=relative_path_str,
             dependencies=dependencies,
         )
 
+        indexed_files += 1
+        indexed_symbols += len(symbols)
+
+    # Remove files that no longer exist.
+    with indexer._connect() as connection:
+
+        rows = connection.execute(
+            "SELECT path FROM files"
+        ).fetchall()
+
+        indexed_paths = {
+            str(row["path"]).replace(
+                "\\",
+                "/",
+            )
+            for row in rows
+        }
+
+        deleted_paths = (
+            indexed_paths - current_files
+        )
+
+        for deleted_path in deleted_paths:
+
+            connection.execute(
+                """
+                DELETE FROM files
+                WHERE path = ?
+                """,
+                (deleted_path,),
+            )
+
+        deleted_files = len(
+            deleted_paths
+        )
+
+        connection.commit()
+
     return (
         f"Repository indexed successfully.\n"
-        f"Files indexed: {indexed_files}\n"
+        f"Files updated: {indexed_files}\n"
+        f"Files skipped: {skipped_files}\n"
+        f"Files deleted: {deleted_files}\n"
         f"Symbols indexed: {indexed_symbols}\n"
         f"Database: {indexer.database_path}"
     )
+
 
 @mcp.tool()
 def index_stats() -> str:
@@ -331,8 +403,11 @@ def index_stats() -> str:
         f"Indexed files: {stats['files']}\n"
         f"Indexed symbols: {stats['symbols']}\n"
         f"Indexed references: {stats['references']}\n"
+        f"Indexed dependencies: "
+        f"{stats.get('dependencies', 0)}\n"
         f"Database: {stats['database']}"
     )
+
 
 @mcp.tool()
 def find_usages(
@@ -374,6 +449,7 @@ def find_usages(
 
     return "\n".join(lines)
 
+
 @mcp.tool()
 def get_dependencies(
     relative_path: str,
@@ -403,16 +479,24 @@ def get_dependencies(
 
     lines = []
 
+    normalized_source = str(
+        relative_path
+    ).replace(
+        "\\",
+        "/",
+    )
+
     for dependency in dependencies:
 
         lines.append(
-            f"{relative_path} -> "
+            f"{normalized_source} -> "
             f"{dependency['path']} "
             f"[{dependency['dependency_type']}] "
             f"line {dependency['line']}"
         )
 
     return "\n".join(lines)
+
 
 if __name__ == "__main__":
     mcp.run()
