@@ -41,7 +41,7 @@ Git Repository
 - [x] Find usages
 - [x] Dependency graph
 - [x] Git intelligence
-- [ ] Incremental indexing
+- [x] Incremental indexing
 - [ ] AI agent integration
 - [ ] Semantic code search
 - [ ] Evaluation benchmarks

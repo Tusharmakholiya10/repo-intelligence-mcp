@@ -500,3 +500,4 @@ def get_dependencies(
 
 if __name__ == "__main__":
     mcp.run()
+# Incremental indexing test
