@@ -498,6 +498,11 @@ def get_dependencies(
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
+def main():
+    """Start the RepoMind MCP server."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
 # Incremental indexing test
