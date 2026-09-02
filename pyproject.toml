@@ -18,6 +18,10 @@ dev = [
     "pytest"
 ]
 
+agent = [
+    "google-genai"
+]
+
 [project.scripts]
 repomind = "repomind.server:main"
 
