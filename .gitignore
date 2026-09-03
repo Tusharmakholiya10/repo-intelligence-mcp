@@ -10,8 +10,10 @@ venv/
 # RepoMind generated index
 .repomind/
 
-# Environment variables
+# Environment variables / secrets
 .env
+.env.*
+!.env.example
 
 # IDE
 .vscode/

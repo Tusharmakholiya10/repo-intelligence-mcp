@@ -16,6 +16,14 @@ class Repository:
         "build",
     }
 
+    IGNORED_FILE_NAMES = {
+        ".env",
+    }
+
+    IGNORED_FILE_SUFFIXES = {
+        ".egg-info",
+    }
+
     SEARCHABLE_EXTENSIONS = {
         ".py",
         ".js",
@@ -57,12 +65,34 @@ class Repository:
             )
 
     def _is_ignored(self, path: Path) -> bool:
-        """Check whether a path belongs to an ignored directory."""
+        """Check whether a path belongs to an ignored directory or file."""
 
-        return any(
+        # Ignore directories anywhere in the path.
+        if any(
             part in self.IGNORED_DIRECTORIES
             for part in path.parts
-        )
+        ):
+            return True
+
+        # Ignore explicitly sensitive file names.
+        if path.name in self.IGNORED_FILE_NAMES:
+            return True
+
+        # Ignore generated/package metadata directories,
+        # and anything nested inside them
+        # (e.g. example.egg-info/PKG-INFO).
+        if any(
+            part.endswith(tuple(self.IGNORED_FILE_SUFFIXES))
+            for part in path.parts
+        ):
+            return True
+
+        # Ignore environment-specific files such as:
+        # .env.local, .env.production, .env.test
+        if path.name.startswith(".env."):
+            return True
+
+        return False
 
     def _resolve_safe_path(self, relative_path: str) -> Path:
         """
