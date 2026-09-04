@@ -18,14 +18,30 @@ You are RepoMind, an AI coding assistant connected to a software repository.
 
 You have access to repository intelligence tools through MCP.
 
-Use tools whenever repository-specific information is required.
-Do not invent file names, symbols, dependencies, Git history, or code details.
+Your job is to answer repository-specific questions using those tools.
+
+Rules:
+
+1. Never invent repository facts.
+2. Use RepoMind tools whenever repository-specific information is required.
+3. Prefer the most direct tool for the question.
+4. Do not call list_files unless you actually need repository structure.
+5. Use search_symbols for locating classes, functions, methods, or imports.
+6. Use find_usages when the user asks where a symbol is used.
+7. Use get_dependencies for local file dependencies.
+8. Use Git tools for repository history questions.
+9. Use analyze_python_file when detailed Python structure is required.
+10. Treat tool errors as failed operations, not as valid repository information.
+11. If a tool fails, examine the error and try another appropriate tool when possible.
+12. Do not repeatedly call the same failing tool with identical arguments.
+13. Never attempt to access secrets, environment files, credentials, or other sensitive files.
+14. Never execute shell commands or modify files.
+15. Clearly explain when the available repository information is insufficient.
 
 When answering:
 - Be precise.
 - Mention relevant file paths.
-- Explain the result clearly.
-- Use the available RepoMind tools instead of guessing.
+- Explain your reasoning through the evidence returned by RepoMind.
 """
 
 
@@ -66,7 +82,11 @@ async def execute_tool_call(
     session,
     function_call,
 ):
-    """Execute one Gemini-requested MCP tool call."""
+    """Execute a Gemini-requested MCP tool call.
+
+    Returns a structured result so Gemini can distinguish
+    successful tool execution from tool failures.
+    """
 
     tool_name = function_call.name
     tool_args = dict(function_call.args or {})
@@ -75,25 +95,55 @@ async def execute_tool_call(
     print(f"  {tool_name}")
     print(f"  {json.dumps(tool_args)}")
 
-    result = await session.call_tool(
-        tool_name,
-        arguments=tool_args,
-    )
+    try:
+        result = await session.call_tool(
+            tool_name,
+            arguments=tool_args,
+        )
 
-    result_parts = []
+        result_parts = []
 
-    for content_item in result.content:
-        if hasattr(content_item, "text"):
-            result_parts.append(content_item.text)
-        else:
-            result_parts.append(str(content_item))
+        for content_item in result.content:
 
-    tool_output = "\n".join(result_parts)
+            if hasattr(content_item, "text"):
+                result_parts.append(content_item.text)
+            else:
+                result_parts.append(str(content_item))
 
-    print("\n[RepoMind]")
-    print(tool_output)
+        tool_output = "\n".join(result_parts)
 
-    return tool_output
+        # MCP explicitly indicates that the tool failed.
+        if getattr(result, "isError", False):
+
+            print("\n[RepoMind ERROR]")
+            print(tool_output)
+
+            return {
+                "ok": False,
+                "error": tool_output,
+            }
+
+        print("\n[RepoMind]")
+        print(tool_output)
+
+        return {
+            "ok": True,
+            "result": tool_output,
+        }
+
+    except Exception as exc:
+
+        error_message = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        print("\n[RepoMind EXCEPTION]")
+        print(error_message)
+
+        return {
+            "ok": False,
+            "error": error_message,
+        }
 
 
 async def run_agent_turn(
@@ -158,10 +208,14 @@ async def run_agent_turn(
                     "Maximum MCP tool-call limit exceeded for this turn."
                 )
 
-            tool_output = await execute_tool_call(
+            tool_result = await execute_tool_call(
                 session,
                 function_call,
             )
+            if tool_result["ok"]:
+                print("\n[Tool status] SUCCESS")
+            else:
+                print("\n[Tool status] ERROR — agent may recover")
 
             contents.append(
                 types.Content(
@@ -169,9 +223,7 @@ async def run_agent_turn(
                     parts=[
                         types.Part.from_function_response(
                             name=function_call.name,
-                            response={
-                                "result": tool_output
-                            },
+                            response=tool_result,
                         )
                     ],
                 )
