@@ -591,7 +591,7 @@ async def run_agent_turn(
                 trace
             )
 
-            return
+            return trace
 
         response = await generate_with_retry(
             gemini,
@@ -644,7 +644,7 @@ async def run_agent_turn(
                 trace
             )
 
-            return
+            return trace
 
         # ---------------------------------------------------------
         # Preserve Gemini's tool-call response.
@@ -682,10 +682,10 @@ async def run_agent_turn(
                 )
 
                 await print_agent_trace(
-                    trace
+                    trace 
                 )
 
-                return
+                return trace    
 
             tool_result = (
                 await execute_tool_call(
@@ -719,6 +719,111 @@ async def run_agent_turn(
                     ],
                 )
             )
+
+def print_help():
+    """Print interactive RepoMind commands."""
+
+    print(
+        """
+RepoMind commands
+-----------------
+/help    Show this help message
+/tools   Show available MCP tools
+/stats   Show repository index statistics
+/trace   Show the last agent tool trace
+/clear   Clear conversation history
+/exit    Exit RepoMind
+
+Anything else is treated as a repository question.
+"""
+    )
+
+def print_tools(tools):
+    """Print available RepoMind MCP tools."""
+
+    print("\nAvailable RepoMind tools")
+    print("-" * 40)
+
+    for tool in tools:
+        description = (
+            tool.description
+            or "No description available."
+        )
+
+        print(f"\n{tool.name}")
+        print(f"  {description}")
+
+    print("-" * 40)
+
+def print_last_trace(trace):
+    """Print the most recent agent execution trace."""
+
+    if trace is None or not trace.tool_calls:
+        print("\nNo agent trace available.")
+        return
+
+    print("\nLast agent trace")
+    print("-" * 40)
+
+    for index, call in enumerate(
+        trace.tool_calls,
+        start=1,
+    ):
+        status = (
+            "SUCCESS"
+            if call["success"]
+            else "ERROR"
+        )
+
+        print(
+            f"{index}. "
+            f"{call['tool']} -> {status}"
+        )
+
+    print(
+        f"\nTotal tool calls: "
+        f"{trace.call_count}"
+    )
+
+async def print_index_stats(session):
+    """Display RepoMind index statistics."""
+
+    try:
+        result = await session.call_tool(
+            "index_stats",
+            arguments={},
+        )
+
+        result_parts = []
+
+        for content_item in result.content:
+            if hasattr(content_item, "text"):
+                result_parts.append(
+                    content_item.text
+                )
+            else:
+                result_parts.append(
+                    str(content_item)
+                )
+
+        output = "\n".join(result_parts)
+
+        if getattr(result, "isError", False):
+            print("\n[Index stats error]")
+            print(output)
+            return
+
+        print("\nRepoMind index statistics")
+        print("-" * 40)
+        print(output)
+        print("-" * 40)
+
+    except Exception as exc:
+        print("\n[Index stats error]")
+        print(
+            f"{type(exc).__name__}: {exc}"
+        )
+
 
 
 async def main():
@@ -829,6 +934,7 @@ async def main():
                 # =================================================
 
                 contents = []
+                last_trace = AgentTrace()
 
                 # =================================================
                 # 5. Interactive user loop
@@ -837,7 +943,6 @@ async def main():
                 while True:
 
                     try:
-
                         user_query = input(
                             "You: "
                         ).strip()
@@ -846,30 +951,69 @@ async def main():
                         EOFError,
                         KeyboardInterrupt,
                     ):
-
                         print(
                             "\nGoodbye!"
                         )
-
                         break
 
                     if not user_query:
                         continue
 
-                    if user_query.lower() in {
+                    command = user_query.lower()
+
+                    # =========================================================
+                    # Built-in commands
+                    # =========================================================
+
+                    if command in {
+                        "/exit",
+                        "/quit",
                         "exit",
                         "quit",
                     }:
-
                         print(
                             "Goodbye!"
                         )
-
                         break
+
+                    if command == "/help":
+                        print_help()
+                        continue
+
+                    if command == "/tools":
+                        print_tools(
+                            tools_result.tools
+                        )
+                        continue
+
+                    if command == "/stats":
+                        await print_index_stats(
+                            session
+                        )
+                        continue
+
+                    if command == "/trace":
+                        print_last_trace(
+                            last_trace
+                        )
+                        continue
+
+                    if command == "/clear":
+                        contents.clear()
+                        last_trace = AgentTrace()
+
+                        print(
+                            "\nConversation history cleared."
+                        )
+                        continue
+
+                    # =========================================================
+                    # Normal AI question
+                    # =========================================================
 
                     try:
 
-                        await run_agent_turn(
+                        last_trace = await run_agent_turn(
                             gemini,
                             session,
                             gemini_tools,
