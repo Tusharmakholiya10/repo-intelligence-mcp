@@ -42,6 +42,6 @@ Git Repository
 - [x] Dependency graph
 - [x] Git intelligence
 - [x] Incremental indexing
-- [ ] AI agent integration
+- [x] AI agent integration
 - [ ] Semantic code search
 - [ ] Evaluation benchmarks
