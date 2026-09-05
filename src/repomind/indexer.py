@@ -1,9 +1,131 @@
 import sqlite3
+import struct
 from pathlib import Path
 
 
 class CodeIndexer:
     """Persistent SQLite index for repository code intelligence."""
+
+    @staticmethod
+    def _serialize_embedding(
+        embedding: list[float],
+    ) -> bytes:
+        """Serialize a float vector into SQLite-compatible bytes."""
+
+        if not embedding:
+            raise ValueError(
+                "Embedding cannot be empty."
+            )
+
+        return struct.pack(
+            f"<{len(embedding)}d",
+            *embedding,
+        )
+
+    @staticmethod
+    def _deserialize_embedding(
+        data: bytes,
+    ) -> list[float]:
+        """Deserialize SQLite embedding bytes into floats."""
+
+        if not data:
+            raise ValueError(
+                "Embedding data cannot be empty."
+            )
+
+        float_count = len(data) // 8
+
+        return list(
+            struct.unpack(
+                f"<{float_count}d",
+                data,
+            )
+        )
+
+
+
+    def index_semantic_chunks(
+        self,
+        relative_path: str,
+        chunks: list[dict],
+    ):
+        """
+        Replace semantic chunks for a repository file.
+        
+        """
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
+        with self._connect() as connection:
+
+            file_row = connection.execute(
+                """
+                SELECT id
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            if file_row is None:
+                raise ValueError(
+                    f"File is not indexed: {relative_path}"
+                )
+
+            file_id = file_row["id"]
+
+            connection.execute(
+                """
+                DELETE FROM semantic_chunks
+                WHERE file_id = ?
+                """,
+                (file_id,),
+            )
+
+            for chunk in chunks:
+
+                embedding = chunk.get(
+                    "embedding"
+                )
+
+                if not embedding:
+                    raise ValueError(
+                        "Semantic chunk is missing embedding."
+                    )
+
+                embedding_blob = (
+                    self._serialize_embedding(
+                        embedding
+                    )
+                )
+
+                connection.execute(
+                    """
+                    INSERT INTO semantic_chunks (
+                        file_id,
+                        start_line,
+                        end_line,
+                        symbol_name,
+                        symbol_type,
+                        content,
+                        embedding
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        chunk["start_line"],
+                        chunk["end_line"],
+                        chunk.get("symbol_name"),
+                        chunk.get("symbol_type"),
+                        chunk["content"],
+                        embedding_blob,
+                    ),
+                )
+
+            connection.commit()
 
     def __init__(
         self,
@@ -85,6 +207,25 @@ class CodeIndexer:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS semantic_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                symbol_name TEXT,
+                symbol_type TEXT,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+
+                FOREIGN KEY(file_id)
+                    REFERENCES files(id)
+                    ON DELETE CASCADE
+            );
+                
+                CREATE INDEX IF NOT EXISTS
+                idx_semantic_chunks_file_id
+                ON semantic_chunks(file_id);
+            
                 CREATE INDEX IF NOT EXISTS
                     idx_symbols_name
                     ON symbols(name);
@@ -331,11 +472,16 @@ class CodeIndexer:
                 "SELECT COUNT(*) FROM dependencies"
             ).fetchone()[0]
 
+            semantic_chunk_count = connection.execute(
+                "SELECT COUNT(*) FROM semantic_chunks"
+            ).fetchone()[0]
+
         return {
             "files": file_count,
             "symbols": symbol_count,
             "references": reference_count,
             "dependencies": dependency_count,
+            "semantic_chunks": semantic_chunk_count,
             "database": str(self.database_path),
         }
 
@@ -551,3 +697,78 @@ class CodeIndexer:
                 dict(row)
                 for row in rows
             ]
+
+    def get_semantic_chunks(
+        self,
+        relative_path: str | None = None,
+    ) -> list[dict]:
+        """Return stored semantic chunks."""
+
+        with self._connect() as connection:
+
+            if relative_path is None:
+
+                rows = connection.execute(
+                    """
+                    SELECT
+                        files.path,
+                        semantic_chunks.start_line,
+                        semantic_chunks.end_line,
+                        semantic_chunks.symbol_name,
+                        semantic_chunks.symbol_type,
+                        semantic_chunks.content,
+                        semantic_chunks.embedding
+                    FROM semantic_chunks
+                    JOIN files
+                        ON semantic_chunks.file_id = files.id
+                    ORDER BY
+                        files.path,
+                        semantic_chunks.start_line
+                    """
+                ).fetchall()
+
+            else:
+
+                relative_path = (
+                    self._normalize_path(
+                        relative_path
+                    )
+                )
+
+                rows = connection.execute(
+                    """
+                    SELECT
+                        files.path,
+                        semantic_chunks.start_line,
+                        semantic_chunks.end_line,
+                        semantic_chunks.symbol_name,
+                        semantic_chunks.symbol_type,
+                        semantic_chunks.content,
+                        semantic_chunks.embedding
+                    FROM semantic_chunks
+                    JOIN files
+                        ON semantic_chunks.file_id = files.id
+                    WHERE files.path = ?
+                    ORDER BY
+                        semantic_chunks.start_line
+                    """,
+                    (relative_path,),
+                ).fetchall()
+
+            results = []
+
+            for row in rows:
+
+                result = dict(row)
+
+                result["embedding"] = (
+                    self._deserialize_embedding(
+                        row["embedding"]
+                    )
+                )
+
+                results.append(
+                    result
+                )
+
+            return results
