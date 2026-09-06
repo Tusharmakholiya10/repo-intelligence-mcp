@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sqlite3
 import struct
 from pathlib import Path
@@ -5,6 +7,62 @@ from pathlib import Path
 
 class CodeIndexer:
     """Persistent SQLite index for repository code intelligence."""
+
+    def __init__(
+        self,
+        repository_root: Path,
+        database_path: Path | None = None,
+    ):
+        self.repository_root = repository_root.resolve()
+
+        if database_path is None:
+            database_path = (
+                self.repository_root
+                / ".repomind"
+                / "index.db"
+            )
+
+        self.database_path = Path(database_path)
+
+        self.database_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self._initialize_database()
+
+    def _connect(self):
+        """Create a SQLite database connection."""
+
+        connection = sqlite3.connect(
+            self.database_path
+        )
+
+        connection.row_factory = sqlite3.Row
+
+        connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        return connection
+
+    def _normalize_path(
+        self,
+        relative_path: str,
+    ) -> str:
+        """
+        Normalize repository-relative paths.
+
+        SQLite stores paths using forward slashes so that
+        Windows and Unix-style paths are treated consistently.
+        """
+
+        return str(
+            Path(relative_path)
+        ).replace(
+            "\\",
+            "/",
+        )
 
     @staticmethod
     def _serialize_embedding(
@@ -18,7 +76,7 @@ class CodeIndexer:
             )
 
         return struct.pack(
-            f"<{len(embedding)}d",
+            f"<{len(embedding)}f",
             *embedding,
         )
 
@@ -33,16 +91,348 @@ class CodeIndexer:
                 "Embedding data cannot be empty."
             )
 
-        float_count = len(data) // 8
+        if len(data) % 4 != 0:
+            raise ValueError(
+                "Invalid embedding byte length."
+            )
+
+        float_count = len(data) // 4
 
         return list(
             struct.unpack(
-                f"<{float_count}d",
+                f"<{float_count}f",
                 data,
             )
         )
 
+    def _initialize_database(self):
+        """Create database tables if they do not exist."""
 
+        with self._connect() as connection:
+
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    language TEXT,
+                    size INTEGER NOT NULL,
+                    modified_time TEXT NOT NULL,
+                    semantic_indexed INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS symbols (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    qualified_name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+
+                    FOREIGN KEY(file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_symbols_name
+                    ON symbols(name);
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_symbols_qualified_name
+                    ON symbols(qualified_name);
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_symbols_file_id
+                    ON symbols(file_id);
+
+                CREATE TABLE IF NOT EXISTS symbol_references (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL,
+                    symbol_name TEXT NOT NULL,
+                    line INTEGER NOT NULL,
+                    reference_type TEXT NOT NULL,
+
+                    FOREIGN KEY(file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_references_symbol
+                    ON symbol_references(symbol_name);
+
+                CREATE TABLE IF NOT EXISTS dependencies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_file_id INTEGER NOT NULL,
+                    target_file_id INTEGER NOT NULL,
+                    dependency_type TEXT NOT NULL,
+                    line INTEGER,
+
+                    UNIQUE(
+                        source_file_id,
+                        target_file_id,
+                        dependency_type,
+                        line
+                    ),
+
+                    FOREIGN KEY(source_file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE,
+
+                    FOREIGN KEY(target_file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_dependencies_source
+                    ON dependencies(source_file_id);
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_dependencies_target
+                    ON dependencies(target_file_id);
+
+                CREATE TABLE IF NOT EXISTS semantic_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    symbol_name TEXT,
+                    symbol_type TEXT,
+                    content TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+
+                    FOREIGN KEY(file_id)
+                        REFERENCES files(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_semantic_chunks_file_id
+                    ON semantic_chunks(file_id);
+                """
+            )
+
+            # ---------------------------------------------------------
+            # Database migration for existing repositories.
+            # ---------------------------------------------------------
+
+            columns = connection.execute(
+                "PRAGMA table_info(files)"
+            ).fetchall()
+
+            column_names = {
+                row["name"]
+                for row in columns
+            }
+
+            if "semantic_indexed" not in column_names:
+
+                connection.execute(
+                    """
+                    ALTER TABLE files
+                    ADD COLUMN semantic_indexed INTEGER
+                    NOT NULL DEFAULT 0
+                    """
+                )
+
+            # Existing files that already have semantic chunks
+            # are considered semantically indexed.
+            connection.execute(
+                """
+                UPDATE files
+                SET semantic_indexed = 1
+                WHERE id IN (
+                    SELECT DISTINCT file_id
+                    FROM semantic_chunks
+                )
+                """
+            )
+
+            connection.commit()
+
+    def index_file(
+        self,
+        relative_path: str,
+        language: str,
+        size: int,
+        modified_time: str,
+        symbols: list[dict],
+    ):
+        """Insert or replace a file and its symbols."""
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
+        with self._connect() as connection:
+
+            connection.execute(
+                """
+                INSERT INTO files (
+                    path,
+                    language,
+                    size,
+                    modified_time,
+                    semantic_indexed
+                )
+                VALUES (?, ?, ?, ?, 0)
+
+                ON CONFLICT(path)
+                DO UPDATE SET
+                    language = excluded.language,
+                    size = excluded.size,
+                    modified_time = excluded.modified_time,
+                    semantic_indexed = 0
+                """,
+                (
+                    relative_path,
+                    language,
+                    size,
+                    modified_time,
+                ),
+            )
+
+            file_row = connection.execute(
+                """
+                SELECT id
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            if file_row is None:
+                raise ValueError(
+                    f"File could not be indexed: {relative_path}"
+                )
+
+            file_id = file_row["id"]
+
+            connection.execute(
+                """
+                DELETE FROM symbols
+                WHERE file_id = ?
+                """,
+                (file_id,),
+            )
+
+            for symbol in symbols:
+
+                connection.execute(
+                    """
+                    INSERT INTO symbols (
+                        file_id,
+                        name,
+                        qualified_name,
+                        type,
+                        line,
+                        end_line
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        symbol["name"],
+                        symbol["qualified_name"],
+                        symbol["type"],
+                        symbol["line"],
+                        symbol["end_line"],
+                    ),
+                )
+
+            connection.commit()
+
+    def needs_reindex(
+        self,
+        relative_path: str,
+        size: int,
+        modified_time: str,
+    ) -> bool:
+        """
+        Return True if a file is new or has changed
+        since it was last indexed.
+        """
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
+        with self._connect() as connection:
+
+            row = connection.execute(
+                """
+                SELECT size, modified_time
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            if row is None:
+                return True
+
+            if row["size"] != size:
+                return True
+
+            if row["modified_time"] != modified_time:
+                return True
+
+            return False
+
+    def needs_semantic_reindex(
+        self,
+        relative_path: str,
+    ) -> bool:
+        """
+        Return True if semantic indexing has not been completed
+        for the file.
+        """
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
+        with self._connect() as connection:
+
+            row = connection.execute(
+                """
+                SELECT semantic_indexed
+                FROM files
+                WHERE path = ?
+                """,
+                (relative_path,),
+            ).fetchone()
+
+            if row is None:
+                return True
+
+            return row["semantic_indexed"] == 0
+
+    def mark_semantic_indexed(
+        self,
+        relative_path: str,
+    ):
+        """Mark semantic indexing as successfully completed."""
+
+        relative_path = self._normalize_path(
+            relative_path
+        )
+
+        with self._connect() as connection:
+
+            connection.execute(
+                """
+                UPDATE files
+                SET semantic_indexed = 1
+                WHERE path = ?
+                """,
+                (relative_path,),
+            )
+
+            connection.commit()
 
     def index_semantic_chunks(
         self,
@@ -51,7 +441,6 @@ class CodeIndexer:
     ):
         """
         Replace semantic chunks for a repository file.
-        
         """
 
         relative_path = self._normalize_path(
@@ -127,291 +516,6 @@ class CodeIndexer:
 
             connection.commit()
 
-    def __init__(
-        self,
-        repository_root: Path,
-        database_path: Path | None = None,
-    ):
-        self.repository_root = repository_root.resolve()
-
-        if database_path is None:
-            database_path = (
-                self.repository_root
-                / ".repomind"
-                / "index.db"
-            )
-
-        self.database_path = Path(database_path)
-
-        self.database_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        self._initialize_database()
-
-    def _connect(self):
-        """Create a SQLite database connection."""
-
-        connection = sqlite3.connect(
-            self.database_path
-        )
-
-        connection.row_factory = sqlite3.Row
-
-        # Required for ON DELETE CASCADE to work in SQLite.
-        connection.execute(
-            "PRAGMA foreign_keys = ON"
-        )
-
-        return connection
-
-    def _normalize_path(self, relative_path: str) -> str:
-        """
-        Normalize repository-relative paths.
-
-        SQLite stores paths using forward slashes so that
-        Windows and Unix-style paths are treated consistently.
-        """
-
-        return str(
-            Path(relative_path)
-        ).replace("\\", "/")
-
-    def _initialize_database(self):
-        """Create database tables if they do not exist."""
-
-        with self._connect() as connection:
-
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS files (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    path TEXT NOT NULL UNIQUE,
-                    language TEXT,
-                    size INTEGER NOT NULL,
-                    modified_time TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS symbols (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    file_id INTEGER NOT NULL,
-                    name TEXT NOT NULL,
-                    qualified_name TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    line INTEGER NOT NULL,
-                    end_line INTEGER NOT NULL,
-
-                    FOREIGN KEY(file_id)
-                        REFERENCES files(id)
-                        ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS semantic_chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id INTEGER NOT NULL,
-                start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL,
-                symbol_name TEXT,
-                symbol_type TEXT,
-                content TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-
-                FOREIGN KEY(file_id)
-                    REFERENCES files(id)
-                    ON DELETE CASCADE
-            );
-                
-                CREATE INDEX IF NOT EXISTS
-                idx_semantic_chunks_file_id
-                ON semantic_chunks(file_id);
-            
-                CREATE INDEX IF NOT EXISTS
-                    idx_symbols_name
-                    ON symbols(name);
-
-                CREATE INDEX IF NOT EXISTS
-                    idx_symbols_qualified_name
-                    ON symbols(qualified_name);
-
-                CREATE INDEX IF NOT EXISTS
-                    idx_symbols_file_id
-                    ON symbols(file_id);
-
-                CREATE TABLE IF NOT EXISTS symbol_references (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    file_id INTEGER NOT NULL,
-                    symbol_name TEXT NOT NULL,
-                    line INTEGER NOT NULL,
-                    reference_type TEXT NOT NULL,
-
-                    FOREIGN KEY(file_id)
-                        REFERENCES files(id)
-                        ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS
-                    idx_references_symbol
-                    ON symbol_references(symbol_name);
-
-                CREATE TABLE IF NOT EXISTS dependencies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_file_id INTEGER NOT NULL,
-                    target_file_id INTEGER NOT NULL,
-                    dependency_type TEXT NOT NULL,
-                    line INTEGER,
-
-                    UNIQUE(
-                        source_file_id,
-                        target_file_id,
-                        dependency_type,
-                        line
-                    ),
-
-                    FOREIGN KEY(source_file_id)
-                        REFERENCES files(id)
-                        ON DELETE CASCADE,
-
-                    FOREIGN KEY(target_file_id)
-                        REFERENCES files(id)
-                        ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS
-                    idx_dependencies_source
-                    ON dependencies(source_file_id);
-
-                CREATE INDEX IF NOT EXISTS
-                    idx_dependencies_target
-                    ON dependencies(target_file_id);
-                """
-            )
-
-    def index_file(
-        self,
-        relative_path: str,
-        language: str,
-        size: int,
-        modified_time: str,
-        symbols: list[dict],
-    ):
-        """Insert or replace a file and its symbols."""
-
-        relative_path = self._normalize_path(
-            relative_path
-        )
-
-        with self._connect() as connection:
-
-            connection.execute(
-                """
-                INSERT INTO files (
-                    path,
-                    language,
-                    size,
-                    modified_time
-                )
-                VALUES (?, ?, ?, ?)
-
-                ON CONFLICT(path)
-                DO UPDATE SET
-                    language = excluded.language,
-                    size = excluded.size,
-                    modified_time = excluded.modified_time
-                """,
-                (
-                    relative_path,
-                    language,
-                    size,
-                    modified_time,
-                ),
-            )
-
-            file_row = connection.execute(
-                """
-                SELECT id
-                FROM files
-                WHERE path = ?
-                """,
-                (relative_path,),
-            ).fetchone()
-
-            file_id = file_row["id"]
-
-            connection.execute(
-                """
-                DELETE FROM symbols
-                WHERE file_id = ?
-                """,
-                (file_id,),
-            )
-
-            for symbol in symbols:
-
-                connection.execute(
-                    """
-                    INSERT INTO symbols (
-                        file_id,
-                        name,
-                        qualified_name,
-                        type,
-                        line,
-                        end_line
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        file_id,
-                        symbol["name"],
-                        symbol["qualified_name"],
-                        symbol["type"],
-                        symbol["line"],
-                        symbol["end_line"],
-                    ),
-                )
-
-            connection.commit()
-
-    def needs_reindex(
-        self,
-        relative_path: str,
-        size: int,
-        modified_time: str,
-    ) -> bool:
-        """
-        Return True if a file is new or has changed
-        since it was last indexed.
-        """
-
-        relative_path = self._normalize_path(
-            relative_path
-        )
-
-        with self._connect() as connection:
-
-            row = connection.execute(
-                """
-                SELECT size, modified_time
-                FROM files
-                WHERE path = ?
-                """,
-                (relative_path,),
-            ).fetchone()
-
-            # File is not indexed yet.
-            if row is None:
-                return True
-
-            # File size changed.
-            if row["size"] != size:
-                return True
-
-            # Modification time changed.
-            if row["modified_time"] != modified_time:
-                return True
-
-            return False
-
     def search_symbols(
         self,
         query: str,
@@ -450,40 +554,6 @@ class CodeIndexer:
                 dict(row)
                 for row in rows
             ]
-
-    def get_stats(self) -> dict:
-        """Return basic index statistics."""
-
-        with self._connect() as connection:
-
-            file_count = connection.execute(
-                "SELECT COUNT(*) FROM files"
-            ).fetchone()[0]
-
-            symbol_count = connection.execute(
-                "SELECT COUNT(*) FROM symbols"
-            ).fetchone()[0]
-
-            reference_count = connection.execute(
-                "SELECT COUNT(*) FROM symbol_references"
-            ).fetchone()[0]
-
-            dependency_count = connection.execute(
-                "SELECT COUNT(*) FROM dependencies"
-            ).fetchone()[0]
-
-            semantic_chunk_count = connection.execute(
-                "SELECT COUNT(*) FROM semantic_chunks"
-            ).fetchone()[0]
-
-        return {
-            "files": file_count,
-            "symbols": symbol_count,
-            "references": reference_count,
-            "dependencies": dependency_count,
-            "semantic_chunks": semantic_chunk_count,
-            "database": str(self.database_path),
-        }
 
     def index_references(
         self,
@@ -697,6 +767,54 @@ class CodeIndexer:
                 dict(row)
                 for row in rows
             ]
+
+    def get_stats(self) -> dict:
+        """Return basic index statistics."""
+
+        with self._connect() as connection:
+
+            file_count = connection.execute(
+                "SELECT COUNT(*) FROM files"
+            ).fetchone()[0]
+
+            symbol_count = connection.execute(
+                "SELECT COUNT(*) FROM symbols"
+            ).fetchone()[0]
+
+            reference_count = connection.execute(
+                "SELECT COUNT(*) FROM symbol_references"
+            ).fetchone()[0]
+
+            dependency_count = connection.execute(
+                "SELECT COUNT(*) FROM dependencies"
+            ).fetchone()[0]
+
+            semantic_chunk_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM semantic_chunks
+                """
+            ).fetchone()[0]
+
+            semantic_indexed_file_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM files
+                WHERE semantic_indexed = 1
+                """
+            ).fetchone()[0]
+
+        return {
+            "files": file_count,
+            "symbols": symbol_count,
+            "references": reference_count,
+            "dependencies": dependency_count,
+            "semantic_chunks": semantic_chunk_count,
+            "semantic_indexed_files": (
+                semantic_indexed_file_count
+            ),
+            "database": str(self.database_path),
+        }
 
     def get_semantic_chunks(
         self,

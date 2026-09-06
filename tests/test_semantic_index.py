@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from repomind.indexer import CodeIndexer
@@ -78,9 +79,9 @@ def test_semantic_chunks_can_be_stored_and_retrieved(
 
     assert len(result["embedding"]) == 3
 
-    assert result["embedding"][0] == 0.1
-    assert result["embedding"][1] == 0.2
-    assert result["embedding"][2] == 0.3
+    assert result["embedding"][0] == pytest.approx(0.1)
+    assert result["embedding"][1] == pytest.approx(0.2)
+    assert result["embedding"][2] == pytest.approx(0.3)
 
 
 def test_semantic_chunks_are_replaced(
@@ -145,7 +146,7 @@ def test_semantic_chunks_are_replaced(
 
     assert len(results) == 1
     assert results[0]["content"] == "new content"
-    assert results[0]["embedding"][0] == 0.3
+    assert results[0]["embedding"][0] == pytest.approx(0.3)
 
 
 def test_semantic_chunk_stats(

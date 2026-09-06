@@ -7,6 +7,8 @@ from repomind.repository import Repository
 from repomind.analyzer import PythonAnalyzer
 from repomind.indexer import CodeIndexer
 from repomind.git import GitManager
+from repomind.chunker import CodeChunker
+from repomind.embeddings import EmbeddingEngine
 
 
 mcp = FastMCP("RepoMind")
@@ -249,7 +251,9 @@ def index_repository() -> str:
     Build or update the SQLite code index for the configured repository.
 
     Only new or modified files are analyzed.
-    Deleted files are removed from the index.
+
+    Semantic chunks are generated and embedded only for
+    new, modified, or not-yet-semantically-indexed files.
     """
 
     repository = get_repository()
@@ -262,118 +266,268 @@ def index_repository() -> str:
         repository.root
     )
 
+    chunker = CodeChunker()
+
+    try:
+        embedding_engine = EmbeddingEngine()
+
+    except ValueError as error:
+        return (
+            f"Semantic indexing unavailable: {error}"
+        )
+
     indexed_files = 0
     indexed_symbols = 0
+    semantic_chunks_indexed = 0
     skipped_files = 0
     deleted_files = 0
+    embedding_errors = 0
 
     current_files = set()
 
-    for path in repository.root.rglob("*.py"):
+    try:
 
-        if repository._is_ignored(path):
-            continue
+        for path in repository.root.rglob("*.py"):
 
-        relative_path = path.relative_to(
-            repository.root
-        )
+            if repository._is_ignored(path):
+                continue
 
-        # Always store repository paths using
-        # forward slashes for cross-platform consistency.
-        relative_path_str = str(
-            relative_path
-        ).replace("\\", "/")
-
-        current_files.add(
-            relative_path_str
-        )
-
-        stat = path.stat()
-
-        modified_time = datetime.fromtimestamp(
-            stat.st_mtime
-        ).isoformat()
-
-        # Skip files that have not changed.
-        if not indexer.needs_reindex(
-            relative_path_str,
-            stat.st_size,
-            modified_time,
-        ):
-            skipped_files += 1
-            continue
-
-        try:
-            symbols = analyzer.analyze_file(
-                relative_path_str
+            relative_path = path.relative_to(
+                repository.root
             )
 
-            references = analyzer.find_references(
-                relative_path_str
-            )
-
-            dependencies = analyzer.find_dependencies(
-                relative_path_str
-            )
-
-        except ValueError:
-            continue
-
-        indexer.index_file(
-            relative_path=relative_path_str,
-            language="python",
-            size=stat.st_size,
-            modified_time=modified_time,
-            symbols=symbols,
-        )
-
-        indexer.index_references(
-            relative_path=relative_path_str,
-            references=references,
-        )
-
-        indexer.index_dependencies(
-            relative_path=relative_path_str,
-            dependencies=dependencies,
-        )
-
-        indexed_files += 1
-        indexed_symbols += len(symbols)
-
-    # Remove files that no longer exist.
-    with indexer._connect() as connection:
-
-        rows = connection.execute(
-            "SELECT path FROM files"
-        ).fetchall()
-
-        indexed_paths = {
-            str(row["path"]).replace(
+            relative_path_str = str(
+                relative_path
+            ).replace(
                 "\\",
                 "/",
             )
-            for row in rows
-        }
 
-        deleted_paths = (
-            indexed_paths - current_files
-        )
-
-        for deleted_path in deleted_paths:
-
-            connection.execute(
-                """
-                DELETE FROM files
-                WHERE path = ?
-                """,
-                (deleted_path,),
+            current_files.add(
+                relative_path_str
             )
 
-        deleted_files = len(
-            deleted_paths
-        )
+            stat = path.stat()
 
-        connection.commit()
+            modified_time = (
+                datetime.fromtimestamp(
+                    stat.st_mtime
+                ).isoformat()
+            )
+
+            # -------------------------------------------------
+            # Determine whether this file needs work.
+            # -------------------------------------------------
+
+            needs_code_reindex = (
+                indexer.needs_reindex(
+                    relative_path_str,
+                    stat.st_size,
+                    modified_time,
+                )
+            )
+
+            needs_semantic_reindex = (
+                indexer.needs_semantic_reindex(
+                    relative_path_str
+                )
+            )
+
+            if (
+                not needs_code_reindex
+                and not needs_semantic_reindex
+            ):
+                skipped_files += 1
+                continue
+
+            try:
+
+                # -------------------------------------------------
+                # Analyze source
+                # -------------------------------------------------
+
+                symbols = analyzer.analyze_file(
+                    relative_path_str
+                )
+
+                references = (
+                    analyzer.find_references(
+                        relative_path_str
+                    )
+                )
+
+                dependencies = (
+                    analyzer.find_dependencies(
+                        relative_path_str
+                    )
+                )
+
+                # -------------------------------------------------
+                # Read source
+                # -------------------------------------------------
+
+                source_text = path.read_text(
+                    encoding="utf-8"
+                )
+
+                # -------------------------------------------------
+                # Create semantic chunks
+                # -------------------------------------------------
+
+                chunks = (
+                    chunker.chunk_python_file(
+                        relative_path_str,
+                        source_text,
+                        symbols,
+                    )
+                )
+
+                # -------------------------------------------------
+                # Generate embeddings
+                # -------------------------------------------------
+
+                chunk_texts = [
+                    chunk.content
+                    for chunk in chunks
+                ]
+
+                embeddings = (
+                    embedding_engine.embed_documents(
+                        chunk_texts
+                    )
+                    if chunk_texts
+                    else []
+                )
+
+                if len(embeddings) != len(
+                    chunks
+                ):
+                    raise RuntimeError(
+                        "Embedding count does not match "
+                        "semantic chunk count."
+                    )
+
+                semantic_chunk_records = []
+
+                for chunk, embedding in zip(
+                    chunks,
+                    embeddings,
+                ):
+
+                    semantic_chunk_records.append(
+                        {
+                            "start_line": (
+                                chunk.start_line
+                            ),
+                            "end_line": (
+                                chunk.end_line
+                            ),
+                            "symbol_name": (
+                                chunk.symbol_name
+                            ),
+                            "symbol_type": (
+                                chunk.symbol_type
+                            ),
+                            "content": chunk.content,
+                            "embedding": embedding,
+                        }
+                    )
+
+            except (
+                ValueError,
+                UnicodeDecodeError,
+                OSError,
+                RuntimeError,
+            ):
+                embedding_errors += 1
+                continue
+
+            # -------------------------------------------------
+            # Persist normal index.
+            # -------------------------------------------------
+
+            indexer.index_file(
+                relative_path=relative_path_str,
+                language="python",
+                size=stat.st_size,
+                modified_time=modified_time,
+                symbols=symbols,
+            )
+
+            indexer.index_references(
+                relative_path=relative_path_str,
+                references=references,
+            )
+
+            indexer.index_dependencies(
+                relative_path=relative_path_str,
+                dependencies=dependencies,
+            )
+
+            # -------------------------------------------------
+            # Persist semantic index.
+            # -------------------------------------------------
+
+            indexer.index_semantic_chunks(
+                relative_path=relative_path_str,
+                chunks=semantic_chunk_records,
+            )
+
+            indexer.mark_semantic_indexed(
+                relative_path_str
+            )
+
+            indexed_files += 1
+            indexed_symbols += len(symbols)
+            semantic_chunks_indexed += len(
+                semantic_chunk_records
+            )
+
+        # ---------------------------------------------------------
+        # Remove deleted files.
+        # Cascading deletes remove their semantic chunks too.
+        # ---------------------------------------------------------
+
+        with indexer._connect() as connection:
+
+            rows = connection.execute(
+                "SELECT path FROM files"
+            ).fetchall()
+
+            indexed_paths = {
+                str(
+                    row["path"]
+                ).replace(
+                    "\\",
+                    "/",
+                )
+                for row in rows
+            }
+
+            deleted_paths = (
+                indexed_paths - current_files
+            )
+
+            for deleted_path in deleted_paths:
+
+                connection.execute(
+                    """
+                    DELETE FROM files
+                    WHERE path = ?
+                    """,
+                    (deleted_path,),
+                )
+
+            deleted_files = len(
+                deleted_paths
+            )
+
+            connection.commit()
+
+    finally:
+        embedding_engine.close()
+
+    stats = indexer.get_stats()
 
     return (
         f"Repository indexed successfully.\n"
@@ -381,6 +535,12 @@ def index_repository() -> str:
         f"Files skipped: {skipped_files}\n"
         f"Files deleted: {deleted_files}\n"
         f"Symbols indexed: {indexed_symbols}\n"
+        f"Semantic chunks indexed: "
+        f"{semantic_chunks_indexed}\n"
+        f"Semantic indexing errors: "
+        f"{embedding_errors}\n"
+        f"Semantic indexed files: "
+        f"{stats['semantic_indexed_files']}\n"
         f"Database: {indexer.database_path}"
     )
 
@@ -405,6 +565,10 @@ def index_stats() -> str:
         f"Indexed references: {stats['references']}\n"
         f"Indexed dependencies: "
         f"{stats.get('dependencies', 0)}\n"
+        f"Semantic chunks: "
+        f"{stats.get('semantic_chunks', 0)}\n"
+        f"Semantic indexed files: "
+        f"{stats.get('semantic_indexed_files', 0)}\n"
         f"Database: {stats['database']}"
     )
 
@@ -500,9 +664,9 @@ def get_dependencies(
 
 def main():
     """Start the RepoMind MCP server."""
+
     mcp.run()
 
-    
+
 if __name__ == "__main__":
     main()
-# Incremental indexing test
