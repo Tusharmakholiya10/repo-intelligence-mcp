@@ -18,6 +18,56 @@ MAX_GEMINI_RETRIES = 3
 
 GEMINI_RETRY_DELAYS = [2, 4, 8]
 
+SEMANTIC_TOOL_NAME = "semantic_search"
+
+SEMANTIC_QUERY_MARKERS = (
+    "how does",
+    "how is",
+    "how are",
+    "where is",
+    "where are",
+    "where does",
+    "why does",
+    "why is",
+    "mechanism",
+    "purpose",
+    "responsible for",
+    "prevented",
+    "protected",
+    "protects",
+    "validated",
+    "sanitized",
+    "handled",
+    "secured",
+    "security",
+    "authentication",
+    "authorization",
+    "access control",
+    "path traversal",
+    "sensitive files",
+    "secrets",
+)
+
+EXACT_QUERY_MARKERS = (
+    "function defined",
+    "class defined",
+    "method defined",
+    "symbol defined",
+    "function called",
+    "where is the function",
+    "where is the class",
+    "where is the method",
+    "who uses",
+    "referenced",
+    "imports",
+    "depends on",
+    "dependency",
+    "exact string",
+    "error message",
+    "code pattern",
+    "specific identifier",
+)
+
 
 SYSTEM_INSTRUCTION = """
 You are RepoMind, an AI coding assistant connected to a software repository.
@@ -313,6 +363,42 @@ def extract_function_calls(response):
     return function_calls
 
 
+def is_semantic_query(query):
+    """
+    Determine whether a user question is primarily conceptual.
+
+    Conceptual questions should begin with semantic_search rather than
+    exact text search.
+    """
+
+    normalized = " ".join(
+        query.lower().strip().split()
+    )
+
+    # Exact/code-oriented questions should keep normal tool routing.
+    if any(
+        marker in normalized
+        for marker in EXACT_QUERY_MARKERS
+    ):
+        return False
+
+    if (
+        "where is" in normalized
+        and (
+            " defined" in normalized
+            or " used" in normalized
+            or " called" in normalized
+            or " referenced" in normalized
+        )
+    ):
+        return False
+
+    return any(
+        marker in normalized
+        for marker in SEMANTIC_QUERY_MARKERS
+    )
+
+
 def is_quota_exhausted_error(exc):
     """
     Determine whether a Gemini error indicates exhausted API quota.
@@ -393,6 +479,7 @@ async def generate_with_retry(
     gemini,
     contents,
     gemini_tools,
+    forced_tool_name=None,
 ):
     """
     Generate a Gemini response with retry/backoff.
@@ -400,6 +487,18 @@ async def generate_with_retry(
     Only transient provider errors are retried.
     Non-transient errors are raised immediately.
     """
+
+    tool_config = None
+
+    if forced_tool_name:
+        tool_config = types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode="ANY",
+                allowed_function_names=[
+                    forced_tool_name
+                ],
+            )
+        )
 
     for attempt in range(
         MAX_GEMINI_RETRIES + 1
@@ -413,6 +512,7 @@ async def generate_with_retry(
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
                     tools=gemini_tools,
+                    tool_config=tool_config,
                 ),
             )
 
@@ -660,6 +760,19 @@ async def run_agent_turn(
 
     trace = AgentTrace()
 
+    semantic_first = (
+        is_semantic_query(user_query)
+        and any(
+            declaration.name == SEMANTIC_TOOL_NAME
+            for tool in gemini_tools
+            for declaration in (
+                tool.function_declarations or []
+            )
+        )
+    )
+
+    first_generation = True
+
     while True:
 
         if (
@@ -681,11 +794,19 @@ async def run_agent_turn(
 
             return trace
 
+        forced_tool_name = None
+
+        if semantic_first and first_generation:
+            forced_tool_name = SEMANTIC_TOOL_NAME
+
         response = await generate_with_retry(
             gemini,
             contents,
             gemini_tools,
+            forced_tool_name=forced_tool_name,
         )
+
+        first_generation = False
 
         function_calls = (
             extract_function_calls(
@@ -770,10 +891,10 @@ async def run_agent_turn(
                 )
 
                 await print_agent_trace(
-                    trace
+                    trace 
                 )
 
-                return trace
+                return trace    
 
             tool_result = (
                 await execute_tool_call(
@@ -808,7 +929,6 @@ async def run_agent_turn(
                 )
             )
 
-
 def print_help():
     """Print interactive RepoMind commands."""
 
@@ -827,7 +947,6 @@ Anything else is treated as a repository question.
 """
     )
 
-
 def print_tools(tools):
     """Print available RepoMind MCP tools."""
 
@@ -844,7 +963,6 @@ def print_tools(tools):
         print(f"  {description}")
 
     print("-" * 40)
-
 
 def print_last_trace(trace):
     """Print the most recent agent execution trace."""
@@ -875,7 +993,6 @@ def print_last_trace(trace):
         f"\nTotal tool calls: "
         f"{trace.call_count}"
     )
-
 
 async def print_index_stats(session):
     """Display RepoMind index statistics."""
@@ -915,6 +1032,7 @@ async def print_index_stats(session):
         print(
             f"{type(exc).__name__}: {exc}"
         )
+
 
 
 async def main():
