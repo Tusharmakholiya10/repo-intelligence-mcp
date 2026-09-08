@@ -313,17 +313,51 @@ def extract_function_calls(response):
     return function_calls
 
 
+def is_quota_exhausted_error(exc):
+    """
+    Determine whether a Gemini error indicates exhausted API quota.
+
+    Quota exhaustion should not be retried because waiting a few seconds
+    will not restore the available quota.
+    """
+
+    message = str(exc).lower()
+
+    quota_messages = (
+        "quota exceeded",
+        "quota exhausted",
+        "resource_exhausted",
+        "resource exhausted",
+        "generate_content_free_tier_requests",
+        "free_tier",
+    )
+
+    return any(
+        phrase in message
+        for phrase in quota_messages
+    )
+
+
 def is_transient_gemini_error(exc):
     """
     Determine whether a Gemini exception is likely temporary.
 
-    We retry common temporary service failures such as:
-    - 429 rate limiting
+    Retry:
+    - 429 temporary rate limiting
     - 500 internal server errors
     - 502 bad gateway
     - 503 service unavailable
     - 504 gateway timeout
+
+    Do not retry:
+    - exhausted quota
+    - authentication errors
+    - invalid requests
+    - other permanent failures
     """
+
+    if is_quota_exhausted_error(exc):
+        return False
 
     message = str(exc).lower()
 
@@ -336,7 +370,6 @@ def is_transient_gemini_error(exc):
     )
 
     transient_messages = (
-        "resource exhausted",
         "rate limit",
         "too many requests",
         "internal server error",
@@ -384,6 +417,13 @@ async def generate_with_retry(
             )
 
         except Exception as exc:
+
+            # Quota exhaustion is not a temporary failure.
+            if is_quota_exhausted_error(exc):
+                raise RuntimeError(
+                    "Gemini API quota is exhausted. "
+                    "The request was stopped without retrying."
+                ) from exc
 
             # Do not retry authentication errors,
             # invalid requests, or other permanent failures.
@@ -730,10 +770,10 @@ async def run_agent_turn(
                 )
 
                 await print_agent_trace(
-                    trace 
+                    trace
                 )
 
-                return trace    
+                return trace
 
             tool_result = (
                 await execute_tool_call(
@@ -768,6 +808,7 @@ async def run_agent_turn(
                 )
             )
 
+
 def print_help():
     """Print interactive RepoMind commands."""
 
@@ -786,6 +827,7 @@ Anything else is treated as a repository question.
 """
     )
 
+
 def print_tools(tools):
     """Print available RepoMind MCP tools."""
 
@@ -802,6 +844,7 @@ def print_tools(tools):
         print(f"  {description}")
 
     print("-" * 40)
+
 
 def print_last_trace(trace):
     """Print the most recent agent execution trace."""
@@ -832,6 +875,7 @@ def print_last_trace(trace):
         f"\nTotal tool calls: "
         f"{trace.call_count}"
     )
+
 
 async def print_index_stats(session):
     """Display RepoMind index statistics."""
@@ -871,7 +915,6 @@ async def print_index_stats(session):
         print(
             f"{type(exc).__name__}: {exc}"
         )
-
 
 
 async def main():
