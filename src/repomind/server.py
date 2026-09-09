@@ -661,6 +661,147 @@ def get_dependencies(
 
     return "\n".join(lines)
 
+@mcp.tool()
+def semantic_search(
+    query: str,
+    max_results: int = 5,
+    min_similarity: float = 0.0,
+) -> str:
+    """
+    Search repository code semantically using Gemini embeddings.
+
+    Returns the most semantically relevant code chunks.
+    """
+
+    if not query or not query.strip():
+        return "Semantic search query cannot be empty."
+
+    if max_results < 1:
+        return "max_results must be at least 1."
+
+    if not 0.0 <= min_similarity <= 1.0:
+        return (
+            "min_similarity must be between 0.0 and 1.0."
+        )
+
+    repository = get_repository()
+
+    indexer = CodeIndexer(
+        repository.root
+    )
+
+    stats = indexer.get_stats()
+
+    if stats.get("semantic_chunks", 0) == 0:
+        return (
+            "Semantic index is empty. "
+            "Run index_repository() first."
+        )
+
+    try:
+        embedding_engine = EmbeddingEngine()
+
+        try:
+            query_embedding = (
+                embedding_engine.embed_query(
+                    query
+                )
+            )
+
+        finally:
+            embedding_engine.close()
+
+    except Exception as error:
+        return (
+            f"Semantic embedding error: {error}"
+        )
+
+    try:
+        results = indexer.semantic_search(
+            query_embedding=query_embedding,
+            max_results=max_results,
+            min_similarity=min_similarity,
+            query_text=query,
+        )
+
+    except ValueError as error:
+        return (
+            f"Semantic search error: {error}"
+        )
+
+    if not results:
+        return (
+            f"No semantic matches found for: {query}"
+        )
+
+    lines = [
+        f"Semantic search results for: {query}",
+        ""
+    ]
+
+    for index, result in enumerate(
+        results,
+        start=1,
+    ):
+
+        similarity = result["similarity"]
+        lexical_score = result.get(
+            "lexical_score",
+            0.0,
+        )
+        relevance_score = result.get(
+            "score",
+            similarity,
+        )
+
+        lines.append(
+            f"{index}. "
+            f"{result['path']}:"
+            f"{result['start_line']}-"
+            f"{result['end_line']}"
+        )
+
+        if result["symbol_name"]:
+            lines.append(
+                f"   Symbol: "
+                f"{result['symbol_name']}"
+            )
+
+        if result["symbol_type"]:
+            lines.append(
+                f"   Type: "
+                f"{result['symbol_type']}"
+            )
+
+        lines.append(
+            f"   Semantic similarity: "
+            f"{similarity:.4f}"
+        )
+
+        lines.append(
+            f"   Lexical relevance: "
+            f"{lexical_score:.4f}"
+        )
+
+        lines.append(
+            f"   Combined score: "
+            f"{relevance_score:.4f}"
+        )
+
+        lines.append(
+            "   Code:"
+        )
+
+        lines.append(
+            "\n".join(
+                f"   {line}"
+                for line in result["content"].splitlines()
+            )
+        )
+
+        lines.append("")
+
+    return "\n".join(lines)
 
 def main():
     """Start the RepoMind MCP server."""

@@ -1,8 +1,10 @@
 from __future__ import annotations
-
+import math
+import re
 import sqlite3
 import struct
 from pathlib import Path
+
 
 
 class CodeIndexer:
@@ -890,3 +892,339 @@ class CodeIndexer:
                 )
 
             return results
+
+    @staticmethod
+    def _tokenize_search_text(text: str) -> list[str]:
+        """
+        Tokenize text for lightweight lexical relevance scoring.
+
+        Splits identifiers such as ``_resolve_safe_path`` into useful
+        searchable terms while keeping normal words intact.
+        """
+
+        if not text:
+            return []
+
+        text = re.sub(
+            r"([a-z0-9])([A-Z])",
+            r"\1 \2",
+            text,
+        )
+
+        tokens = re.findall(
+            r"[a-z0-9]+",
+            text.lower(),
+        )
+
+        stop_words = {
+            "a",
+            "an",
+            "and",
+            "are",
+            "be",
+            "by",
+            "does",
+            "for",
+            "from",
+            "how",
+            "in",
+            "is",
+            "it",
+            "of",
+            "on",
+            "or",
+            "the",
+            "to",
+            "what",
+            "where",
+            "which",
+            "who",
+            "why",
+            "with",
+        }
+
+        return [
+            token
+            for token in tokens
+            if token not in stop_words
+        ]
+
+    @staticmethod
+    def _normalize_search_token(token: str) -> set[str]:
+        """
+        Generate a small set of related forms for one lexical token.
+
+        This is intentionally lightweight and dependency-free. It helps
+        queries such as "prevented" match code/documentation using
+        "prevents" or "prevent".
+        """
+
+        forms = {token}
+
+        if len(token) > 4:
+            for suffix in ("ing", "ed", "es", "s"):
+                if token.endswith(suffix):
+                    stem = token[: -len(suffix)]
+
+                    if len(stem) >= 3:
+                        forms.add(stem)
+
+                    if suffix in {"es", "s"} and token.endswith("ies"):
+                        forms.add(
+                            token[:-3] + "y"
+                        )
+
+        return forms
+
+    @classmethod
+    def _lexical_relevance(
+        cls,
+        query: str,
+        path: str,
+        symbol_name: str | None,
+        symbol_type: str | None,
+        content: str,
+    ) -> float:
+        """
+        Calculate a lightweight lexical relevance score in [0, 1].
+
+        The score combines:
+        - query-term coverage in the chunk
+        - exact query phrase matches
+        - extra weight for symbol/path metadata
+        """
+
+        query_tokens = cls._tokenize_search_text(
+            query
+        )
+
+        if not query_tokens:
+            return 0.0
+
+        query_forms = [
+            cls._normalize_search_token(token)
+            for token in query_tokens
+        ]
+
+        content_tokens = set(
+            cls._tokenize_search_text(content)
+        )
+        metadata_text = " ".join(
+            part
+            for part in (
+                path,
+                symbol_name or "",
+                symbol_type or "",
+            )
+            if part
+        )
+        metadata_tokens = set(
+            cls._tokenize_search_text(
+                metadata_text
+            )
+        )
+
+        matched_terms = 0
+
+        for forms in query_forms:
+            if forms & content_tokens:
+                matched_terms += 1
+                continue
+
+            if forms & metadata_tokens:
+                matched_terms += 1
+
+        coverage = (
+            matched_terms / len(query_forms)
+        )
+
+        normalized_query = " ".join(
+            query_tokens
+        )
+        normalized_content = " ".join(
+            cls._tokenize_search_text(content)
+        )
+
+        phrase_bonus = (
+            1.0
+            if (
+                len(query_tokens) >= 2
+                and normalized_query in normalized_content
+            )
+            else 0.0
+        )
+
+        metadata_bonus = min(
+            sum(
+                1
+                for forms in query_forms
+                if forms & metadata_tokens
+            )
+            / len(query_forms),
+            1.0,
+        )
+
+        score = (
+            0.65 * coverage
+            + 0.20 * phrase_bonus
+            + 0.15 * metadata_bonus
+        )
+
+        return min(
+            max(score, 0.0),
+            1.0,
+        )
+
+    def semantic_search(
+        self,
+        query_embedding: list[float],
+        max_results: int = 5,
+        min_similarity: float = 0.0,
+        query_text: str | None = None,
+    ) -> list[dict]:
+        """
+        Search semantic chunks using a hybrid relevance score.
+
+        The ranking combines:
+        - cosine similarity from embeddings
+        - lightweight lexical relevance from the query and chunk text
+
+        ``query_text`` is optional for backward compatibility. When it is
+        omitted, results are ranked using cosine similarity only.
+        """
+
+        if not query_embedding:
+            raise ValueError(
+                "Query embedding cannot be empty."
+            )
+
+        if max_results < 1:
+            raise ValueError(
+                "max_results must be at least 1."
+            )
+
+        if not 0.0 <= min_similarity <= 1.0:
+            raise ValueError(
+                "min_similarity must be between 0.0 and 1.0."
+            )
+
+        query_norm = math.sqrt(
+            sum(
+                value * value
+                for value in query_embedding
+            )
+        )
+
+        if query_norm == 0.0:
+            raise ValueError(
+                "Query embedding cannot be a zero vector."
+            )
+
+        with self._connect() as connection:
+
+            rows = connection.execute(
+                """
+                SELECT
+                    files.path,
+                    semantic_chunks.start_line,
+                    semantic_chunks.end_line,
+                    semantic_chunks.symbol_name,
+                    semantic_chunks.symbol_type,
+                    semantic_chunks.content,
+                    semantic_chunks.embedding
+                FROM semantic_chunks
+                JOIN files
+                    ON semantic_chunks.file_id = files.id
+                ORDER BY
+                    files.path,
+                    semantic_chunks.start_line
+                """
+            ).fetchall()
+
+        results = []
+
+        for row in rows:
+
+            embedding = (
+                self._deserialize_embedding(
+                    row["embedding"]
+                )
+            )
+
+            if len(embedding) != len(
+                query_embedding
+            ):
+                continue
+
+            document_norm = math.sqrt(
+                sum(
+                    value * value
+                    for value in embedding
+                )
+            )
+
+            if document_norm == 0.0:
+                continue
+
+            dot_product = sum(
+                query_value * document_value
+                for query_value, document_value
+                in zip(
+                    query_embedding,
+                    embedding,
+                )
+            )
+
+            similarity = (
+                dot_product
+                / (query_norm * document_norm)
+            )
+
+            if similarity < min_similarity:
+                continue
+
+            lexical_score = 0.0
+
+            if query_text:
+                lexical_score = (
+                    self._lexical_relevance(
+                        query=query_text,
+                        path=row["path"],
+                        symbol_name=row["symbol_name"],
+                        symbol_type=row["symbol_type"],
+                        content=row["content"],
+                    )
+                )
+
+            if query_text:
+                combined_score = (
+                    0.65 * similarity
+                    + 0.35 * lexical_score
+                )
+            else:
+                combined_score = similarity
+
+            results.append(
+                {
+                    "path": row["path"],
+                    "start_line": row["start_line"],
+                    "end_line": row["end_line"],
+                    "symbol_name": row["symbol_name"],
+                    "symbol_type": row["symbol_type"],
+                    "content": row["content"],
+                    "similarity": similarity,
+                    "lexical_score": lexical_score,
+                    "score": combined_score,
+                }
+            )
+
+        results.sort(
+            key=lambda item: (
+                item["score"],
+                item["similarity"],
+                item["lexical_score"],
+            ),
+            reverse=True,
+        )
+
+        return results[:max_results]
