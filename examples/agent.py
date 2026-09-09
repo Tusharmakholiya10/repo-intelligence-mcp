@@ -17,6 +17,38 @@ MAX_TOOL_CALLS_PER_TURN = 8
 MAX_GEMINI_RETRIES = 3
 
 GEMINI_RETRY_DELAYS = [2, 4, 8]
+SEMANTIC_TOOL_NAME = "semantic_search"
+VERIFICATION_TOOL_NAME = "read_file"
+
+MAX_VERIFICATION_READS = 2
+
+HIGH_RISK_QUERY_MARKERS = (
+    "security",
+    "secure",
+    "protected",
+    "protection",
+    "path traversal",
+    "unauthorized access",
+    "access control",
+    "authentication",
+    "authorization",
+    "credentials",
+    "secret",
+    "secrets",
+    "api key",
+    "apikey",
+    "password",
+    "token",
+    "sensitive file",
+    "sensitive files",
+    "environment file",
+    ".env",
+    "permission",
+    "permissions",
+    "validation",
+    "sanitized",
+    "sanitize",
+)
 
 SEMANTIC_TOOL_NAME = "semantic_search"
 
@@ -362,6 +394,20 @@ def extract_function_calls(response):
 
     return function_calls
 
+def is_high_risk_query(query):
+    """
+    Determine whether a question requires source-level verification
+    before making a definitive repository-specific claim.
+    """
+
+    normalized = " ".join(
+        query.lower().strip().split()
+    )
+
+    return any(
+        marker in normalized
+        for marker in HIGH_RISK_QUERY_MARKERS
+    )
 
 def is_semantic_query(query):
     """
@@ -759,7 +805,20 @@ async def run_agent_turn(
     )
 
     trace = AgentTrace()
+    semantic_first = (
+        is_semantic_query(user_query)
+        and any(
+            declaration.name == SEMANTIC_TOOL_NAME
+            for tool in gemini_tools
+            for declaration in tool.function_declarations or []
+        )
+    )
 
+    verification_required = is_high_risk_query(user_query)
+    verification_reads = 0
+    verification_complete = False
+    first_generation = True
+    
     semantic_first = (
         is_semantic_query(user_query)
         and any(
@@ -799,6 +858,13 @@ async def run_agent_turn(
         if semantic_first and first_generation:
             forced_tool_name = SEMANTIC_TOOL_NAME
 
+        elif (
+            verification_required
+            and not verification_complete
+            and verification_reads < MAX_VERIFICATION_READS
+        ):
+            forced_tool_name = VERIFICATION_TOOL_NAME
+
         response = await generate_with_retry(
             gemini,
             contents,
@@ -807,12 +873,6 @@ async def run_agent_turn(
         )
 
         first_generation = False
-
-        function_calls = (
-            extract_function_calls(
-                response
-            )
-        )
 
         # ---------------------------------------------------------
         # Gemini has produced the final response.
@@ -903,6 +963,14 @@ async def run_agent_turn(
                     trace,
                 )
             )
+            if (
+                verification_required
+                and function_call.name == VERIFICATION_TOOL_NAME
+            ):
+                verification_reads += 1
+
+                if tool_result["ok"]:
+                    verification_complete = True
 
             if tool_result["ok"]:
 

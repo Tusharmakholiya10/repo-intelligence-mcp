@@ -57,3 +57,28 @@ def test_dependency_question_is_not_semantic():
     assert not is_semantic_query(
         "What does repository.py depend on?"
     )
+from examples.agent import is_high_risk_query
+
+
+def test_security_question_is_high_risk():
+    assert is_high_risk_query(
+        "Where is path traversal prevented?"
+    )
+
+
+def test_sensitive_file_question_is_high_risk():
+    assert is_high_risk_query(
+        "Where are sensitive environment files protected?"
+    )
+
+
+def test_normal_question_is_not_high_risk():
+    assert not is_high_risk_query(
+        "What does repository.py depend on?"
+    )
+
+
+def test_generic_code_question_is_not_high_risk():
+    assert not is_high_risk_query(
+        "Where is the Repository class defined?"
+    )
