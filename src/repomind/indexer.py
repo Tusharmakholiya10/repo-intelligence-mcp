@@ -1075,6 +1075,272 @@ class CodeIndexer:
             1.0,
         )
 
+    @staticmethod
+    def _implementation_relevance(
+        query: str,
+        path: str,
+        symbol_name: str | None,
+        symbol_type: str | None,
+    ) -> float:
+        """
+        Score whether a semantic result looks like production
+        implementation code rather than test code.
+
+        The score is intentionally small so it influences ranking
+        without overpowering semantic or lexical relevance.
+        """
+
+        normalized_path = path.replace("\\", "/").lower()
+        normalized_query = query.lower()
+
+        query_tokens = set(
+            CodeIndexer._tokenize_search_text(query)
+        )
+
+        is_test_file = (
+            "/tests/" in f"/{normalized_path}/"
+            or normalized_path.startswith("tests/")
+            or normalized_path.endswith("_test.py")
+            or normalized_path.split("/")[-1].startswith("test_")
+        )
+
+        test_query_tokens = {
+            "test",
+            "tests",
+            "testing",
+            "pytest",
+            "unittest",
+            "assert",
+            "coverage",
+        }
+
+        # Expand query tokens to their stemmed/related forms (e.g.
+        # "tested" -> "test") so that natural-language test-oriented
+        # questions are recognized even when they don't use the exact
+        # tokens in ``test_query_tokens``.
+        query_forms = set()
+
+        for token in query_tokens:
+            query_forms |= CodeIndexer._normalize_search_token(
+                token
+            )
+
+        query_is_test_oriented = bool(
+            (query_tokens | query_forms) & test_query_tokens
+        )
+
+        score = 0.0
+
+        # Do not penalize tests when the user is explicitly asking
+        # about tests/testing behavior.
+        if is_test_file:
+            if not query_is_test_oriented:
+                score -= 0.15
+
+            return score
+
+        # Prefer repository implementation code for normal
+        # conceptual "where/how" questions.
+        if normalized_path.startswith("src/"):
+            score += 0.08
+
+        # Slight additional preference for actual implementation
+        # symbols over imports.
+        if symbol_type in {
+            "class",
+            "function",
+            "method",
+        }:
+            score += 0.03
+
+        # Reward strong query overlap with the actual symbol name.
+        if symbol_name:
+            symbol_tokens = set(
+                CodeIndexer._tokenize_search_text(
+                    symbol_name
+                )
+            )
+
+            if query_tokens and symbol_tokens:
+                overlap = query_tokens & symbol_tokens
+
+                if overlap:
+                    score += min(
+                        0.10,
+                        0.04 * len(overlap),
+                    )
+
+        return score
+
+    @classmethod
+    def _symbol_relevance(
+        cls,
+        query: str,
+        symbol_name: str | None,
+        symbol_type: str | None,
+        path: str,
+        content: str,
+    ) -> float:
+        """
+        Score how well the result's implementation symbol matches
+        the conceptual operation described by the query.
+        """
+
+        if not query:
+            return 0.0
+
+        query_tokens = set(
+            cls._tokenize_search_text(query)
+        )
+
+        symbol_tokens = set(
+            cls._tokenize_search_text(
+                symbol_name or ""
+            )
+        )
+
+        content_tokens = set(
+            cls._tokenize_search_text(content)
+        )
+
+        score = 0.0
+
+        # Direct symbol/query overlap.
+        if query_tokens and symbol_tokens:
+            overlap = query_tokens & symbol_tokens
+            score += min(
+                0.12,
+                0.04 * len(overlap),
+            )
+
+        # Conceptual implementation-role hints. Each conceptual query
+        # group is paired with its own implementation-terminology set,
+        # so a fallback match only applies to the group that the query
+        # actually triggered -- not to every group indiscriminately.
+        role_definitions = (
+            (
+                {
+                    "embedding",
+                    "embeddings",
+                    "vector",
+                    "generated",
+                },
+                {
+                    "embed",
+                    "embedding",
+                    "embeddings",
+                },
+            ),
+            (
+                {
+                    "search",
+                    "find",
+                    "discover",
+                },
+                {
+                    "search",
+                    "find",
+                },
+            ),
+            (
+                {
+                    "index",
+                    "indexed",
+                    "stored",
+                    "store",
+                    "save",
+                },
+                {
+                    "index",
+                    "indexed",
+                    "indexing",
+                },
+            ),
+            (
+                {
+                    "chunk",
+                    "chunks",
+                    "divided",
+                    "split",
+                    "segmented",
+                },
+                {
+                    "chunk",
+                    "chunks",
+                },
+            ),
+            (
+                {
+                    "dependency",
+                    "dependencies",
+                    "depend",
+                },
+                {
+                    "depend",
+                    "dependency",
+                    "dependencies",
+                },
+            ),
+            (
+                {
+                    "usage",
+                    "usages",
+                    "reference",
+                    "references",
+                },
+                {
+                    "usage",
+                    "usages",
+                    "reference",
+                    "references",
+                },
+            ),
+        )
+
+        for group, implementation_terms in role_definitions:
+            query_matches = query_tokens & group
+
+            if not query_matches:
+                continue
+
+            group_match = any(
+                token in symbol_tokens
+                for token in group
+            )
+
+            if group_match:
+                score += 0.10
+                continue
+
+            # Also look for related implementation terminology, but
+            # only within this group's own terminology set.
+            if symbol_tokens & implementation_terms:
+                score += 0.08
+
+        # Prefer implementation symbols over imports.
+        if symbol_type in {
+            "class",
+            "function",
+            "method",
+        }:
+            score += 0.03
+
+        # Small preference for actual source implementation.
+        normalized_path = path.replace(
+            "\\",
+            "/",
+        ).lower()
+
+        if normalized_path.startswith("src/"):
+            score += 0.02
+
+        # Content overlap is deliberately small because semantic and
+        # lexical ranking already account for the body.
+        if query_tokens & content_tokens:
+            score += 0.02
+
+        return min(score, 0.30)
+
     def semantic_search(
         self,
         query_embedding: list[float],
@@ -1184,6 +1450,8 @@ class CodeIndexer:
                 continue
 
             lexical_score = 0.0
+            implementation_score = 0.0
+            symbol_score = 0.0
 
             if query_text:
                 lexical_score = (
@@ -1196,10 +1464,30 @@ class CodeIndexer:
                     )
                 )
 
+                implementation_score = (
+                    self._implementation_relevance(
+                        query=query_text,
+                        path=row["path"],
+                        symbol_name=row["symbol_name"],
+                        symbol_type=row["symbol_type"],
+                    )
+                )
+                symbol_score = (
+                    self._symbol_relevance(
+                        query=query_text,
+                        symbol_name=row["symbol_name"],
+                        symbol_type=row["symbol_type"],
+                        path=row["path"],
+                        content=row["content"],
+                    )
+                )
+
             if query_text:
                 combined_score = (
-                    0.65 * similarity
-                    + 0.35 * lexical_score
+                    0.62 * similarity
+                    + 0.30 * lexical_score
+                    + implementation_score
+                    + symbol_score
                 )
             else:
                 combined_score = similarity
@@ -1214,6 +1502,8 @@ class CodeIndexer:
                     "content": row["content"],
                     "similarity": similarity,
                     "lexical_score": lexical_score,
+                    "implementation_score": implementation_score,
+                    "symbol_score": symbol_score,
                     "score": combined_score,
                 }
             )

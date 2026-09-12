@@ -154,3 +154,69 @@ def test_semantic_search_without_query_text_keeps_embedding_ranking(
     assert results[0]["path"] == "first.py"
     assert results[0]["score"] == results[0]["similarity"]
     assert results[0]["lexical_score"] == 0.0
+def test_implementation_relevance_prefers_production_code():
+    production_score = CodeIndexer._implementation_relevance(
+        query="Where is path traversal prevented?",
+        path="src/repomind/repository.py",
+        symbol_name="_resolve_safe_path",
+        symbol_type="method",
+    )
+
+    test_score = CodeIndexer._implementation_relevance(
+        query="Where is path traversal prevented?",
+        path="tests/test_repository.py",
+        symbol_name="test_path_traversal",
+        symbol_type="function",
+    )
+
+    assert production_score > test_score
+
+
+def test_implementation_relevance_does_not_penalize_test_queries():
+    score = CodeIndexer._implementation_relevance(
+        query="How is path traversal tested?",
+        path="tests/test_repository.py",
+        symbol_name="test_path_traversal",
+        symbol_type="function",
+    )
+
+    assert score >= 0.0
+
+def test_symbol_relevance_prefers_semantic_search_implementation():
+    score = CodeIndexer._symbol_relevance(
+        query="Where does RepoMind perform semantic code search?",
+        symbol_name="semantic_search",
+        symbol_type="function",
+        path="src/repomind/indexer.py",
+        content="Search semantic chunks using a hybrid relevance score.",
+    )
+
+    unrelated = CodeIndexer._symbol_relevance(
+        query="Where does RepoMind perform semantic code search?",
+        symbol_name="get_dependencies",
+        symbol_type="function",
+        path="src/repomind/indexer.py",
+        content="Return local repository files that a source file depends on.",
+    )
+
+    assert score > unrelated
+
+
+def test_symbol_relevance_prefers_embedding_implementation():
+    score = CodeIndexer._symbol_relevance(
+        query="Where are repository code embeddings generated?",
+        symbol_name="EmbeddingEngine",
+        symbol_type="class",
+        path="src/repomind/embeddings.py",
+        content="Generate semantic embeddings using Gemini.",
+    )
+
+    unrelated = CodeIndexer._symbol_relevance(
+        query="Where are repository code embeddings generated?",
+        symbol_name="index_repository",
+        symbol_type="function",
+        path="src/repomind/server.py",
+        content="Build or update the SQLite code index.",
+    )
+
+    assert score > unrelated
