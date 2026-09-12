@@ -1,4 +1,4 @@
-from repomind.chunker import CodeChunker
+from repomind.chunker import CodeChunker, CodeChunk
 
 
 def test_chunk_python_file_uses_symbols():
@@ -140,3 +140,38 @@ def test_large_symbol_is_split():
 
     assert chunks[3].start_line == 10
     assert chunks[3].end_line == 10
+
+
+def test_build_embedding_text_includes_metadata():
+    chunk = CodeChunk(
+        file_path="src/repomind/repository.py",
+        start_line=1,
+        end_line=10,
+        content="def _resolve_safe_path():\n    pass",
+        symbol_name="Repository._resolve_safe_path",
+        symbol_type="method",
+    )
+
+    embedding_text = CodeChunker.build_embedding_text(
+        chunk
+    )
+
+    assert (
+        "File: src/repomind/repository.py"
+        in embedding_text
+    )
+
+    assert (
+        "Symbol: Repository._resolve_safe_path"
+        in embedding_text
+    )
+
+    assert (
+        "Type: method"
+        in embedding_text
+    )
+
+    assert (
+        "def _resolve_safe_path()"
+        in embedding_text
+    )

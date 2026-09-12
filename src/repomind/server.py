@@ -387,9 +387,11 @@ def index_repository() -> str:
                 # -------------------------------------------------
 
                 chunk_texts = [
-                    chunk.content
-                    for chunk in chunks
-                ]
+                chunker.build_embedding_text(
+                    chunk
+                )
+                for chunk in chunks
+            ]
 
                 embeddings = (
                     embedding_engine.embed_documents(

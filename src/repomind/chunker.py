@@ -148,6 +148,40 @@ class CodeChunker:
                 )
 
         return chunks
+    @staticmethod
+    def build_embedding_text(
+        chunk: CodeChunk,
+    ) -> str:
+        """
+        Build metadata-aware text for semantic embedding.
+
+        The embedding includes repository location and symbol metadata
+        so semantic retrieval can distinguish similarly worded code.
+        """
+
+        lines = [
+            f"File: {chunk.file_path}",
+        ]
+
+        if chunk.symbol_name:
+            lines.append(
+                f"Symbol: {chunk.symbol_name}"
+            )
+
+        if chunk.symbol_type:
+            lines.append(
+                f"Type: {chunk.symbol_type}"
+            )
+
+        lines.extend(
+            [
+                "",
+                "Code:",
+                chunk.content,
+            ]
+        )
+
+        return "\n".join(lines)
 
     def _normalize_symbols(
         self,

@@ -1,0 +1,88 @@
+[
+  {
+    "id": "security_path_traversal",
+    "question": "Where is path traversal prevented?",
+    "expected_path": "src/repomind/repository.py",
+    "expected_symbols": [
+      "_resolve_safe_path"
+    ]
+  },
+  {
+    "id": "security_environment_files",
+    "question": "Where are sensitive environment files protected?",
+    "expected_path": "src/repomind/repository.py",
+    "expected_symbols": [
+      "_is_ignored",
+      "read_file"
+    ]
+  },
+  {
+    "id": "security_repository_access",
+    "question": "How does RepoMind protect access to repository files?",
+    "expected_path": "src/repomind/repository.py",
+    "expected_symbols": [
+      "_resolve_safe_path",
+      "_is_ignored",
+      "read_file"
+    ]
+  },
+  {
+    "id": "semantic_indexing",
+    "question": "How are semantic chunks created and indexed?",
+    "expected_path": "src/repomind/server.py",
+    "expected_symbols": [
+      "index_repository"
+    ]
+  },
+  {
+    "id": "semantic_search",
+    "question": "Where does RepoMind perform semantic code search?",
+    "expected_path": "src/repomind/server.py",
+    "expected_symbols": [
+      "semantic_search"
+    ]
+  },
+  {
+    "id": "symbol_indexing",
+    "question": "Where are classes and functions stored in the code index?",
+    "expected_path": "src/repomind/indexer.py",
+    "expected_symbols": [
+      "index_file",
+      "search_symbols"
+    ]
+  },
+  {
+    "id": "dependency_indexing",
+    "question": "How are local file dependencies stored?",
+    "expected_path": "src/repomind/indexer.py",
+    "expected_symbols": [
+      "index_dependencies",
+      "get_dependencies"
+    ]
+  },
+  {
+    "id": "reference_tracking",
+    "question": "How does RepoMind find usages of a symbol?",
+    "expected_path": "src/repomind/indexer.py",
+    "expected_symbols": [
+      "find_usages",
+      "index_references"
+    ]
+  },
+  {
+    "id": "embedding_generation",
+    "question": "Where are repository code embeddings generated?",
+    "expected_path": "src/repomind/embeddings.py",
+    "expected_symbols": [
+      "EmbeddingEngine"
+    ]
+  },
+  {
+    "id": "code_chunking",
+    "question": "Where is Python source code divided into semantic chunks?",
+    "expected_path": "src/repomind/chunker.py",
+    "expected_symbols": [
+      "CodeChunker"
+    ]
+  }
+]
