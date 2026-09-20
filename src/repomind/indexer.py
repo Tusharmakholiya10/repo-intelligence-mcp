@@ -1351,12 +1351,11 @@ class CodeIndexer:
         content: str,
     ) -> float:
         """
-        Score whether a result owns the requested concept or
-        coordinates multiple stages of a repository operation.
+        Add a small ownership/orchestration signal to semantic ranking.
 
-        This is intentionally a small ranking signal. Semantic,
-        lexical, implementation, and symbol relevance remain the
-        primary signals.
+        The signal favors the component that owns the requested concept
+        and high-level orchestration for multi-stage questions, while
+        avoiding large boosts for low-level storage helpers.
         """
 
         if not query:
@@ -1376,24 +1375,60 @@ class CodeIndexer:
             )
         )
 
-        content_tokens = set(
-            cls._tokenize_search_text(content)
-        )
+        normalized_path = path.replace(
+            "\\",
+            "/",
+        ).lower()
 
         score = 0.0
+
+        def token_matches(
+            query_token: str,
+            candidate: str,
+        ) -> bool:
+            """
+            Match related module/symbol forms.
+
+            Examples:
+                chunk -> chunker
+                embed -> embedding
+                index -> indexer
+            """
+
+            if query_token == candidate:
+                return True
+
+            if len(query_token) >= 4 and candidate.startswith(
+                query_token
+            ):
+                return True
+
+            if len(candidate) >= 4 and query_token.startswith(
+                candidate
+            ):
+                return True
+
+            return False
 
         # ----------------------------------------------------------
         # Component ownership
         #
-        # Prefer the file/symbol that actually owns the concept.
-        # Ownership points are accumulated separately and capped so
-        # a leaf method that happens to match many query words
-        # cannot out-stack a coordinator spanning several stages.
+        # A result owns ONE concept. Each concept group is scored
+        # separately and only the strongest group counts, so a leaf
+        # method whose name mentions several query words (for example
+        # ``index_semantic_chunks``) cannot stack credit across groups
+        # and outrank the component that genuinely owns the concept.
         # ----------------------------------------------------------
 
         ownership_groups = (
             (
-                {"embedding", "embeddings", "embed"},
+                {
+                    "embedding",
+                    "embeddings",
+                    "embed",
+                    "vector",
+                    "generated",
+                },
                 {
                     "embedding",
                     "embeddings",
@@ -1402,114 +1437,186 @@ class CodeIndexer:
                 },
             ),
             (
-                {"chunk", "chunks", "chunked", "chunking"},
-                {"chunk", "chunks", "chunker", "chunking"},
+                {
+                    "chunk",
+                    "chunks",
+                    "chunked",
+                    "chunking",
+                    "divided",
+                    "split",
+                },
+                {
+                    "chunk",
+                    "chunks",
+                    "chunker",
+                    "chunking",
+                },
             ),
             (
-                {"index", "indexed", "indexing"},
-                {"index", "indexed", "indexing", "indexer"},
+                {
+                    "index",
+                    "indexed",
+                    "indexing",
+                    "stored",
+                    "store",
+                    "save",
+                },
+                {
+                    "index",
+                    "indexed",
+                    "indexing",
+                    "indexer",
+                },
             ),
             (
-                {"search", "semantic", "find"},
-                {"search", "semantic"},
+                {
+                    "search",
+                    "semantic",
+                    "find",
+                    "discover",
+                },
+                {
+                    "search",
+                    "semantic",
+                },
             ),
         )
 
         ownership_score = 0.0
 
-        for query_group, ownership_terms in ownership_groups:
+        for query_group, owner_terms in ownership_groups:
 
             if not (query_tokens & query_group):
                 continue
 
-            if path_tokens & ownership_terms:
-                ownership_score += 0.08
+            path_owned = any(
+                token_matches(
+                    query_token,
+                    path_token,
+                )
+                or token_matches(
+                    owner_token,
+                    path_token,
+                )
+                for query_token in query_group
+                for owner_token in owner_terms
+                for path_token in path_tokens
+            )
 
-            if symbol_tokens & ownership_terms:
-                ownership_score += 0.08
+            symbol_owned = any(
+                token_matches(
+                    query_token,
+                    symbol_token,
+                )
+                or token_matches(
+                    owner_token,
+                    symbol_token,
+                )
+                for query_token in query_group
+                for owner_token in owner_terms
+                for symbol_token in symbol_tokens
+            )
 
-        # One path match plus one symbol match is the most ownership
-        # a single result can claim.
-        score += min(ownership_score, 0.16)
+            group_score = 0.0
+
+            if path_owned:
+                group_score += 0.07
+
+            if symbol_owned:
+                group_score += 0.08
+
+            ownership_score = max(
+                ownership_score,
+                group_score,
+            )
+
+        score += ownership_score
 
         # ----------------------------------------------------------
-        # Pipeline/orchestration detection
-        #
-        # A high-level coordinator often contains multiple stages
-        # such as chunking + embedding + indexing.
+        # Multi-stage orchestration intent
         # ----------------------------------------------------------
 
-        pipeline_groups = (
-            {"chunk", "chunks", "chunker", "chunking"},
-            {
-                "embed",
-                "embedding",
-                "embeddings",
-                "embeddingengine",
-            },
-            {"index", "indexed", "indexing", "indexer"},
-        )
-
-        matched_pipeline_stages = 0
-
-        for stage_terms in pipeline_groups:
-            if content_tokens & stage_terms:
-                matched_pipeline_stages += 1
-
-        query_pipeline_terms = {
+        pipeline_terms = {
             "chunk",
             "chunks",
-            "indexed",
-            "index",
-            "indexing",
+            "chunking",
             "embed",
             "embedding",
             "embeddings",
+            "index",
+            "indexed",
+            "indexing",
         }
 
-        query_has_pipeline_intent = bool(
-            query_tokens & query_pipeline_terms
+        pipeline_hits = len(
+            query_tokens & pipeline_terms
         )
 
-        if (
-            query_has_pipeline_intent
-            and matched_pipeline_stages >= 3
-        ):
-            score += 0.12
+        orchestration_symbols = {
+            "repository",
+            "pipeline",
+            "process",
+            "build",
+            "update",
+            "orchestrate",
+        }
 
-        elif (
-            query_has_pipeline_intent
-            and matched_pipeline_stages >= 2
-        ):
-            score += 0.06
+        if pipeline_hits >= 2:
 
-        # ----------------------------------------------------------
-        # Higher-level repository orchestration.
-        # ----------------------------------------------------------
+            coordinator_match = any(
+                token in symbol_tokens
+                for token in orchestration_symbols
+            )
 
-        normalized_path = path.replace(
-            "\\",
-            "/",
-        ).lower()
+            if coordinator_match:
+                score += 0.10
 
-        if (
-            normalized_path == "src/repomind/server.py"
-            and symbol_name in {
-                "index_repository",
-                "semantic_search",
-            }
-        ):
             if (
-                "semantic" in query_tokens
-                or "embedding" in query_tokens
-                or "embeddings" in query_tokens
-                or "chunks" in query_tokens
-                or "chunk" in query_tokens
+                normalized_path == "src/repomind/server.py"
+                and symbol_name == "index_repository"
             ):
                 score += 0.06
 
-        return min(score, 0.30)
-    
+        # ----------------------------------------------------------
+        # Symbol-index questions
+        # ----------------------------------------------------------
+
+        symbol_index_terms = {
+            "class",
+            "classes",
+            "function",
+            "functions",
+            "method",
+            "methods",
+            "symbol",
+            "symbols",
+        }
+
+        if query_tokens & symbol_index_terms:
+
+            if symbol_name in {
+                "index_file",
+                "search_symbols",
+            }:
+                score += 0.12
+
+        # Actual implementation symbol.
+        if symbol_type in {
+            "class",
+            "function",
+            "method",
+        }:
+            score += 0.02
+
+        # Source implementation preference.
+        if normalized_path.startswith("src/"):
+            score += 0.01
+
+        return min(
+            score,
+            0.25,
+        )
+
     def semantic_search(
         self,
         query_embedding: list[float],

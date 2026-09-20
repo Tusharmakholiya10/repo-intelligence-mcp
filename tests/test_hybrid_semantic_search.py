@@ -268,3 +268,65 @@ def test_contextual_role_prefers_pipeline_coordinator():
     )
 
     assert coordinator_score > storage_score
+
+def test_contextual_role_matches_chunker_module():
+    score = CodeIndexer._contextual_role_relevance(
+        query="Where is Python source code divided into semantic chunks?",
+        path="src/repomind/chunker.py",
+        symbol_name="CodeChunker.chunk_python_file",
+        symbol_type="method",
+        content="Create semantic chunks from Python source code.",
+    )
+
+    unrelated = CodeIndexer._contextual_role_relevance(
+        query="Where is Python source code divided into semantic chunks?",
+        path="src/repomind/indexer.py",
+        symbol_name="CodeIndexer.index_semantic_chunks",
+        symbol_type="method",
+        content="Replace semantic chunks for a repository file.",
+    )
+
+    assert score > unrelated
+
+
+def test_contextual_role_prefers_repository_orchestrator():
+    score = CodeIndexer._contextual_role_relevance(
+        query="How are semantic chunks created and indexed?",
+        path="src/repomind/server.py",
+        symbol_name="index_repository",
+        symbol_type="function",
+        content=(
+            "Create semantic chunks, generate embeddings, "
+            "and persist the semantic index."
+        ),
+    )
+
+    low_level = CodeIndexer._contextual_role_relevance(
+        query="How are semantic chunks created and indexed?",
+        path="src/repomind/indexer.py",
+        symbol_name="CodeIndexer.index_semantic_chunks",
+        symbol_type="method",
+        content="Replace semantic chunks for a repository file.",
+    )
+
+    assert score > low_level
+
+
+def test_contextual_role_prefers_symbol_index_functions():
+    score = CodeIndexer._contextual_role_relevance(
+        query="Where are classes and functions stored in the code index?",
+        path="src/repomind/indexer.py",
+        symbol_name="index_file",
+        symbol_type="method",
+        content="Insert or replace a file and its symbols.",
+    )
+
+    unrelated = CodeIndexer._contextual_role_relevance(
+        query="Where are classes and functions stored in the code index?",
+        path="src/repomind/indexer.py",
+        symbol_name="index_semantic_chunks",
+        symbol_type="method",
+        content="Replace semantic chunks for a repository file.",
+    )
+
+    assert score > unrelated
