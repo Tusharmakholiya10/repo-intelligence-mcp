@@ -1,0 +1,5 @@
+{
+  "minimum_hit_at_1": 0.40,
+  "minimum_hit_at_3": 0.80,
+  "minimum_mrr": 0.55
+}

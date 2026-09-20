@@ -1,4 +1,5 @@
 from __future__ import annotations
+import argparse
 
 import json
 import sys
@@ -27,7 +28,22 @@ DATASET_PATH = (
 )
 
 DEFAULT_TOP_K = 5
+RESULTS_DIR = (
+    PROJECT_ROOT
+    / "evaluation"
+    / "results"
+)
 
+RESULTS_PATH = (
+    RESULTS_DIR
+    / "latest.json"
+)
+
+CONFIG_PATH = (
+    PROJECT_ROOT
+    / "evaluation"
+    / "evaluation_config.json"
+)
 
 def load_dataset() -> list[dict]:
     """Load retrieval evaluation questions."""
@@ -50,6 +66,26 @@ def load_dataset() -> list[dict]:
 
     return dataset
 
+def load_config() -> dict:
+    """Load retrieval evaluation thresholds."""
+
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Evaluation config not found: {CONFIG_PATH}"
+        )
+
+    with CONFIG_PATH.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        config = json.load(file)
+
+    if not isinstance(config, dict):
+        raise ValueError(
+            "Evaluation config must contain a JSON object."
+        )
+
+    return config
 
 def normalize_path(path: str) -> str:
     """Normalize repository paths for comparison."""
@@ -168,6 +204,104 @@ def evaluate_query(
         "results": results,
     }
 
+def calculate_metrics(
+    results: list[dict],
+) -> dict:
+    """Calculate aggregate retrieval metrics."""
+
+    total = len(results)
+
+    if total == 0:
+        return {
+            "queries_evaluated": 0,
+            "hit_at_1": 0.0,
+            "hit_at_3": 0.0,
+            "mrr": 0.0,
+        }
+
+    hit_at_1 = sum(
+        result["hit_at_1"]
+        for result in results
+    )
+
+    hit_at_3 = sum(
+        result["hit_at_3"]
+        for result in results
+    )
+
+    mrr = sum(
+        result["reciprocal_rank"]
+        for result in results
+    ) / total
+
+    return {
+        "queries_evaluated": total,
+        "hit_at_1": hit_at_1 / total,
+        "hit_at_3": hit_at_3 / total,
+        "mrr": mrr,
+    }
+
+def check_thresholds(
+    metrics: dict,
+    config: dict,
+) -> tuple[bool, list[str]]:
+    """Check metrics against configured regression floors."""
+
+    checks = {
+        "hit_at_1": float(
+            config["minimum_hit_at_1"]
+        ),
+        "hit_at_3": float(
+            config["minimum_hit_at_3"]
+        ),
+        "mrr": float(
+            config["minimum_mrr"]
+        ),
+    }
+
+    failures = []
+
+    for metric_name, minimum in checks.items():
+        actual = float(metrics[metric_name])
+
+        if actual < minimum:
+            failures.append(
+                f"{metric_name}={actual:.4f} "
+                f"is below minimum {minimum:.4f}"
+            )
+
+    return not failures, failures
+
+def save_report(
+    metrics: dict,
+    results: list[dict],
+) -> None:
+    """Save the latest evaluation report."""
+
+    RESULTS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    report = {
+        "metrics": metrics,
+        "cases": results,
+    }
+
+    with RESULTS_PATH.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            report,
+            file,
+            indent=2,
+        )
+
+    print(
+        f"\nEvaluation report saved to: "
+        f"{RESULTS_PATH}"
+    )
 
 def print_result(result: dict) -> None:
     """Print one evaluation result."""
@@ -223,37 +357,12 @@ def print_result(result: dict) -> None:
         )
 
 
-def print_summary(results: list[dict]) -> None:
-    """Print aggregate retrieval metrics."""
+def print_summary(
+    results: list[dict],
+) -> dict:
+    """Print and return aggregate retrieval metrics."""
 
-    total = len(results)
-
-    if total == 0:
-        print("\nNo evaluation cases found.")
-        return
-
-    hit_at_1 = sum(
-        result["hit_at_1"]
-        for result in results
-    )
-
-    hit_at_3 = sum(
-        result["hit_at_3"]
-        for result in results
-    )
-
-    mrr = sum(
-        result["reciprocal_rank"]
-        for result in results
-    ) / total
-
-    hit_at_1_rate = (
-        hit_at_1 / total
-    )
-
-    hit_at_3_rate = (
-        hit_at_3 / total
-    )
+    metrics = calculate_metrics(results)
 
     print()
     print("=" * 70)
@@ -261,30 +370,51 @@ def print_summary(results: list[dict]) -> None:
     print("=" * 70)
 
     print(
-        f"Queries evaluated: {total}"
+        f"Queries evaluated: "
+        f"{metrics['queries_evaluated']}"
     )
 
     print(
         f"Hit@1: "
-        f"{hit_at_1}/{total} "
-        f"({hit_at_1_rate:.1%})"
+        f"{metrics['hit_at_1']:.1%}"
     )
 
     print(
         f"Hit@3: "
-        f"{hit_at_3}/{total} "
-        f"({hit_at_3_rate:.1%})"
+        f"{metrics['hit_at_3']:.1%}"
     )
 
     print(
-        f"MRR: {mrr:.4f}"
+        f"MRR: "
+        f"{metrics['mrr']:.4f}"
     )
 
     print("=" * 70)
 
+    return metrics
 
-def main() -> None:
+def main() -> int:
     """Run the retrieval benchmark."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the RepoMind retrieval benchmark."
+        )
+    )
+
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save results to evaluation/results/latest.json.",
+    )
+
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check results against regression thresholds.",
+    )
+
+    args = parser.parse_args()
 
     dataset = load_dataset()
 
@@ -312,8 +442,76 @@ def main() -> None:
     finally:
         embedding_engine.close()
 
-    print_summary(results)
+    metrics = print_summary(results)
+
+    if args.save:
+        save_report(
+            metrics,
+            results,
+        )
+
+    if args.check:
+        config = load_config()
+
+        passed, failures = check_thresholds(
+            metrics,
+            config,
+        )
+
+        print()
+        print(
+            "Retrieval regression check"
+        )
+        print("-" * 30)
+
+        for metric_name in (
+            "hit_at_1",
+            "hit_at_3",
+            "mrr",
+        ):
+            minimum = float(
+                config[
+                    f"minimum_{metric_name}"
+                ]
+            )
+
+            actual = metrics[metric_name]
+
+            status = (
+                "PASS"
+                if actual >= minimum
+                else "FAIL"
+            )
+
+            print(
+                f"{metric_name.upper():7} : "
+                f"{actual:.4f} "
+                f"{status} "
+                f"(minimum {minimum:.4f})"
+            )
+
+        if not passed:
+            print()
+            print(
+                "Evaluation failed."
+            )
+
+            for failure in failures:
+                print(
+                    f"  - {failure}"
+                )
+
+            return 1
+
+        print()
+        print(
+            "Evaluation passed."
+        )
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        main()
+    )
