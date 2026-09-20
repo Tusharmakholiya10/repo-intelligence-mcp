@@ -220,3 +220,51 @@ def test_symbol_relevance_prefers_embedding_implementation():
     )
 
     assert score > unrelated
+
+def test_contextual_role_prefers_embedding_owner():
+    owner_score = CodeIndexer._contextual_role_relevance(
+        query="Where are repository code embeddings generated?",
+        path="src/repomind/embeddings.py",
+        symbol_name="EmbeddingEngine",
+        symbol_type="class",
+        content=(
+            "Generate semantic embeddings using Gemini."
+        ),
+    )
+
+    coordinator_score = CodeIndexer._contextual_role_relevance(
+        query="Where are repository code embeddings generated?",
+        path="src/repomind/server.py",
+        symbol_name="index_repository",
+        symbol_type="function",
+        content=(
+            "Build or update the SQLite code index."
+        ),
+    )
+
+    assert owner_score > coordinator_score
+
+
+def test_contextual_role_prefers_pipeline_coordinator():
+    coordinator_score = CodeIndexer._contextual_role_relevance(
+        query="How are semantic chunks created and indexed?",
+        path="src/repomind/server.py",
+        symbol_name="index_repository",
+        symbol_type="function",
+        content=(
+            "Create semantic chunks, generate embeddings, "
+            "and persist the semantic index."
+        ),
+    )
+
+    storage_score = CodeIndexer._contextual_role_relevance(
+        query="How are semantic chunks created and indexed?",
+        path="src/repomind/indexer.py",
+        symbol_name="index_semantic_chunks",
+        symbol_type="method",
+        content=(
+            "Replace semantic chunks for a repository file."
+        ),
+    )
+
+    assert coordinator_score > storage_score
