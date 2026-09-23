@@ -30,3 +30,6 @@ dist/
 
 # RepoMind generated index
 .repomind/
+
+# Generated evaluation reports
+evaluation/results/
