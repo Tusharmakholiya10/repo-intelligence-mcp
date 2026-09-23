@@ -34,7 +34,6 @@ class ComponentRoleClassifier:
         },
         "repository_access": {
             "repository",
-            "repository",
             "file",
             "files",
             "access",

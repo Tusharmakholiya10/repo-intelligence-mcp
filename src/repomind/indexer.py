@@ -1351,11 +1351,10 @@ class CodeIndexer:
         content: str,
     ) -> float:
         """
-        Add a small ownership/orchestration signal to semantic ranking.
+        Add architecture-aware component-role relevance.
 
-        The signal favors the component that owns the requested concept
-        and high-level orchestration for multi-stage questions, while
-        avoiding large boosts for low-level storage helpers.
+        The component-role classifier identifies which repository
+        component owns the requested concept.
         """
 
         if not query:
@@ -1365,242 +1364,84 @@ class CodeIndexer:
             cls._tokenize_search_text(query)
         )
 
-        path_tokens = set(
-            cls._tokenize_search_text(path)
-        )
-
-        symbol_tokens = set(
-            cls._tokenize_search_text(
-                symbol_name or ""
+        query_roles = (
+            ComponentRoleClassifier.classify_query(
+                query
             )
         )
 
-        normalized_path = path.replace(
-            "\\",
-            "/",
-        ).lower()
+        component_role = (
+            ComponentRoleClassifier.classify_component(
+                path=path,
+                symbol_name=symbol_name,
+            )
+        )
 
         score = 0.0
 
-        def token_matches(
-            query_token: str,
-            candidate: str,
-        ) -> bool:
-            """
-            Match related module/symbol forms.
+        # Direct architectural ownership.
+        if component_role in query_roles:
+            score += 0.10
 
-            Examples:
-                chunk -> chunker
-                embed -> embedding
-                index -> indexer
-            """
+        # Multi-stage questions should prefer the
+        # orchestration layer.
+        if (
+            component_role == "orchestration"
+            and "orchestration" in query_roles
+        ):
+            score += 0.10
 
-            if query_token == candidate:
-                return True
+        # Search implementation gets a small additional
+        # signal for explicit search questions.
+        if (
+            component_role == "search"
+            and "search" in query_roles
+        ):
+            score += 0.05
 
-            if len(query_token) >= 4 and candidate.startswith(
-                query_token
-            ):
-                return True
+        # Within the "indexing" role, distinguish symbol/metadata
+        # indexing (e.g. index_file) from semantic-chunk indexing
+        # (e.g. index_semantic_chunks). Both share the same coarse
+        # component role, so without this the two are otherwise
+        # indistinguishable to a query that is clearly about one
+        # or the other.
+        if component_role == "indexing":
 
-            if len(candidate) >= 4 and query_token.startswith(
-                candidate
-            ):
-                return True
-
-            return False
-
-        # ----------------------------------------------------------
-        # Component ownership
-        #
-        # A result owns ONE concept. Each concept group is scored
-        # separately and only the strongest group counts, so a leaf
-        # method whose name mentions several query words (for example
-        # ``index_semantic_chunks``) cannot stack credit across groups
-        # and outrank the component that genuinely owns the concept.
-        # ----------------------------------------------------------
-
-        ownership_groups = (
-            (
-                {
-                    "embedding",
-                    "embeddings",
-                    "embed",
-                    "vector",
-                    "generated",
-                },
-                {
-                    "embedding",
-                    "embeddings",
-                    "embed",
-                    "embeddingengine",
-                },
-            ),
-            (
-                {
-                    "chunk",
-                    "chunks",
-                    "chunked",
-                    "chunking",
-                    "divided",
-                    "split",
-                },
-                {
-                    "chunk",
-                    "chunks",
-                    "chunker",
-                    "chunking",
-                },
-            ),
-            (
-                {
-                    "index",
-                    "indexed",
-                    "indexing",
-                    "stored",
-                    "store",
-                    "save",
-                },
-                {
-                    "index",
-                    "indexed",
-                    "indexing",
-                    "indexer",
-                },
-            ),
-            (
-                {
-                    "search",
-                    "semantic",
-                    "find",
-                    "discover",
-                },
-                {
-                    "search",
-                    "semantic",
-                },
-            ),
-        )
-
-        ownership_score = 0.0
-
-        for query_group, owner_terms in ownership_groups:
-
-            if not (query_tokens & query_group):
-                continue
-
-            path_owned = any(
-                token_matches(
-                    query_token,
-                    path_token,
+            symbol_tokens = set(
+                cls._tokenize_search_text(
+                    symbol_name or ""
                 )
-                or token_matches(
-                    owner_token,
-                    path_token,
-                )
-                for query_token in query_group
-                for owner_token in owner_terms
-                for path_token in path_tokens
             )
 
-            symbol_owned = any(
-                token_matches(
-                    query_token,
-                    symbol_token,
-                )
-                or token_matches(
-                    owner_token,
-                    symbol_token,
-                )
-                for query_token in query_group
-                for owner_token in owner_terms
-                for symbol_token in symbol_tokens
+            chunk_terms = {
+                "chunk",
+                "chunks",
+                "semantic",
+                "embedding",
+                "embeddings",
+            }
+
+            symbol_is_chunk_oriented = bool(
+                symbol_tokens & chunk_terms
             )
 
-            group_score = 0.0
-
-            if path_owned:
-                group_score += 0.07
-
-            if symbol_owned:
-                group_score += 0.08
-
-            ownership_score = max(
-                ownership_score,
-                group_score,
+            query_is_chunk_oriented = bool(
+                query_tokens & chunk_terms
             )
-
-        score += ownership_score
-
-        # ----------------------------------------------------------
-        # Multi-stage orchestration intent
-        # ----------------------------------------------------------
-
-        pipeline_terms = {
-            "chunk",
-            "chunks",
-            "chunking",
-            "embed",
-            "embedding",
-            "embeddings",
-            "index",
-            "indexed",
-            "indexing",
-        }
-
-        pipeline_hits = len(
-            query_tokens & pipeline_terms
-        )
-
-        orchestration_symbols = {
-            "repository",
-            "pipeline",
-            "process",
-            "build",
-            "update",
-            "orchestrate",
-        }
-
-        if pipeline_hits >= 2:
-
-            coordinator_match = any(
-                token in symbol_tokens
-                for token in orchestration_symbols
-            )
-
-            if coordinator_match:
-                score += 0.10
 
             if (
-                normalized_path == "src/repomind/server.py"
-                and symbol_name == "index_repository"
+                symbol_is_chunk_oriented
+                and not query_is_chunk_oriented
             ):
-                score += 0.06
+                score -= 0.05
 
-        # ----------------------------------------------------------
-        # Symbol-index questions
-        # ----------------------------------------------------------
+            elif (
+                not symbol_is_chunk_oriented
+                and query_is_chunk_oriented
+            ):
+                score -= 0.02
 
-        symbol_index_terms = {
-            "class",
-            "classes",
-            "function",
-            "functions",
-            "method",
-            "methods",
-            "symbol",
-            "symbols",
-        }
-
-        if query_tokens & symbol_index_terms:
-
-            if symbol_name in {
-                "index_file",
-                "search_symbols",
-            }:
-                score += 0.12
-
-        # Actual implementation symbol.
+        # Prefer real implementation symbols.
         if symbol_type in {
             "class",
             "function",
@@ -1608,12 +1449,16 @@ class CodeIndexer:
         }:
             score += 0.02
 
-        # Source implementation preference.
+        normalized_path = path.replace(
+            "\\",
+            "/",
+        ).lower()
+
         if normalized_path.startswith("src/"):
             score += 0.01
 
         return min(
-            score,
+            max(score, 0.0),
             0.25,
         )
 
@@ -1780,6 +1625,13 @@ class CodeIndexer:
             else:
                 combined_score = similarity
 
+            component_role = (
+                ComponentRoleClassifier.classify_component(
+                    path=row["path"],
+                    symbol_name=row["symbol_name"],
+                )
+            )
+
             results.append(
                 {
                     "path": row["path"],
@@ -1787,6 +1639,7 @@ class CodeIndexer:
                     "end_line": row["end_line"],
                     "symbol_name": row["symbol_name"],
                     "symbol_type": row["symbol_type"],
+                    "component_role": component_role,
                     "content": row["content"],
                     "similarity": similarity,
                     "lexical_score": lexical_score,

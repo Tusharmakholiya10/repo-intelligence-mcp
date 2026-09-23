@@ -71,3 +71,11 @@ def test_pipeline_query_identifies_orchestration():
     assert "chunking" in roles
     assert "indexing" in roles
     assert "orchestration" in roles
+
+def test_unknown_component_returns_unknown():
+    role = ComponentRoleClassifier.classify_component(
+        path="docs/random.txt",
+        symbol_name="something_unrelated",
+    )
+
+    assert role == "unknown"

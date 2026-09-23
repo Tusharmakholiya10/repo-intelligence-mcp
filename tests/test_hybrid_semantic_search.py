@@ -389,3 +389,49 @@ def test_contextual_role_prefers_orchestration_for_pipeline_query():
     )
 
     assert orchestration_score > chunking_score
+
+def test_semantic_search_returns_component_role(
+    tmp_path,
+):
+    indexer = CodeIndexer(
+        repository_root=tmp_path,
+        database_path=tmp_path / "index.db",
+    )
+
+    _index_chunks(
+        indexer,
+        "src/repomind/embeddings.py",
+        [
+            {
+                "start_line": 1,
+                "end_line": 5,
+                "symbol_name": "EmbeddingEngine",
+                "symbol_type": "class",
+                "content": (
+                    "Generate repository "
+                    "code embeddings."
+                ),
+                "embedding": [
+                    1.0,
+                    0.0,
+                ],
+            }
+        ],
+    )
+
+    results = indexer.semantic_search(
+        query_embedding=[
+            1.0,
+            0.0,
+        ],
+        query_text=(
+            "Where are repository "
+            "code embeddings generated?"
+        ),
+        max_results=1,
+    )
+
+    assert len(results) == 1
+    assert results[0]["component_role"] == (
+        "embedding"
+    )

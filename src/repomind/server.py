@@ -775,6 +775,12 @@ def semantic_search(
                 f"{result['symbol_type']}"
             )
 
+        if result.get("component_role"):
+            lines.append(
+                f"   Architecture role: "
+                f"{result['component_role']}"
+            )
+
         lines.append(
             f"   Semantic similarity: "
             f"{similarity:.4f}"
