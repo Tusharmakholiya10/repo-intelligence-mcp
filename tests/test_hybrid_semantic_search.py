@@ -435,3 +435,53 @@ def test_semantic_search_returns_component_role(
     assert results[0]["component_role"] == (
         "embedding"
     )
+
+def test_semantic_search_accepts_query_intent(
+    tmp_path,
+):
+    indexer = CodeIndexer(
+        repository_root=tmp_path,
+        database_path=tmp_path / "index.db",
+    )
+
+    _index_chunks(
+        indexer,
+        "src/repomind/embeddings.py",
+        [
+            {
+                "start_line": 1,
+                "end_line": 5,
+                "symbol_name": "EmbeddingEngine",
+                "symbol_type": "class",
+                "content": (
+                    "Generate repository "
+                    "code embeddings."
+                ),
+                "embedding": [
+                    1.0,
+                    0.0,
+                ],
+            }
+        ],
+    )
+
+    results = indexer.semantic_search(
+        query_embedding=[
+            1.0,
+            0.0,
+        ],
+        query_text=(
+            "Where are repository "
+            "code embeddings generated?"
+        ),
+        query_intent="semantic_search",
+        max_results=1,
+    )
+
+    assert len(results) == 1
+    assert results[0]["query_intent"] == (
+        "semantic_search"
+    )
+    assert results[0]["retrieval_strategy"] == (
+        "semantic_search"
+    )

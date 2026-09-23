@@ -9,6 +9,9 @@ from repomind.indexer import CodeIndexer
 from repomind.git import GitManager
 from repomind.chunker import CodeChunker
 from repomind.embeddings import EmbeddingEngine
+from repomind.query_intent import (
+    QueryIntentClassifier,
+)
 
 
 mcp = FastMCP("RepoMind")
@@ -686,6 +689,10 @@ def semantic_search(
             "min_similarity must be between 0.0 and 1.0."
         )
 
+    intent = QueryIntentClassifier.classify(
+        query
+    )
+
     repository = get_repository()
 
     indexer = CodeIndexer(
@@ -724,6 +731,7 @@ def semantic_search(
             max_results=max_results,
             min_similarity=min_similarity,
             query_text=query,
+            query_intent=intent.name,
         )
 
     except ValueError as error:
@@ -738,7 +746,9 @@ def semantic_search(
 
     lines = [
         f"Semantic search results for: {query}",
-        ""
+        f"Query intent: {intent.name}",
+        f"Intent confidence: {intent.confidence:.2f}",
+        "",
     ]
 
     for index, result in enumerate(
@@ -779,6 +789,12 @@ def semantic_search(
             lines.append(
                 f"   Architecture role: "
                 f"{result['component_role']}"
+            )
+
+        if result.get("retrieval_strategy"):
+            lines.append(
+                f"   Retrieval strategy: "
+                f"{result['retrieval_strategy']}"
             )
 
         lines.append(
