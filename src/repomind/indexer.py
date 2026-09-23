@@ -4,7 +4,7 @@ import re
 import sqlite3
 import struct
 from pathlib import Path
-
+from repomind.roles import ComponentRoleClassifier
 
 
 class CodeIndexer:

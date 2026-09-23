@@ -330,3 +330,62 @@ def test_contextual_role_prefers_symbol_index_functions():
     )
 
     assert score > unrelated
+
+def test_contextual_role_uses_architecture_owner():
+    embedding_score = (
+        CodeIndexer._contextual_role_relevance(
+            query=(
+                "Where are repository code "
+                "embeddings generated?"
+            ),
+            path="src/repomind/embeddings.py",
+            symbol_name="EmbeddingEngine",
+            symbol_type="class",
+            content="Generate embeddings.",
+        )
+    )
+
+    indexer_score = (
+        CodeIndexer._contextual_role_relevance(
+            query=(
+                "Where are repository code "
+                "embeddings generated?"
+            ),
+            path="src/repomind/indexer.py",
+            symbol_name="index_file",
+            symbol_type="method",
+            content="Store indexed files.",
+        )
+    )
+
+    assert embedding_score > indexer_score
+
+
+def test_contextual_role_prefers_orchestration_for_pipeline_query():
+    orchestration_score = (
+        CodeIndexer._contextual_role_relevance(
+            query=(
+                "How are semantic chunks "
+                "created and indexed?"
+            ),
+            path="src/repomind/server.py",
+            symbol_name="index_repository",
+            symbol_type="function",
+            content="Coordinate repository indexing.",
+        )
+    )
+
+    chunking_score = (
+        CodeIndexer._contextual_role_relevance(
+            query=(
+                "How are semantic chunks "
+                "created and indexed?"
+            ),
+            path="src/repomind/chunker.py",
+            symbol_name="CodeChunker.chunk_python_file",
+            symbol_type="method",
+            content="Create semantic chunks.",
+        )
+    )
+
+    assert orchestration_score > chunking_score
