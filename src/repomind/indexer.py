@@ -5,6 +5,9 @@ import sqlite3
 import struct
 from pathlib import Path
 from repomind.roles import ComponentRoleClassifier
+from repomind.retrieval_strategy import (
+    get_retrieval_strategy,
+)
 
 
 class CodeIndexer:
@@ -1468,6 +1471,7 @@ class CodeIndexer:
         max_results: int = 5,
         min_similarity: float = 0.0,
         query_text: str | None = None,
+        query_intent: str = "general",
     ) -> list[dict]:
         """
         Search semantic chunks using a hybrid relevance score.
@@ -1494,6 +1498,9 @@ class CodeIndexer:
             raise ValueError(
                 "min_similarity must be between 0.0 and 1.0."
             )
+        strategy = get_retrieval_strategy(
+            query_intent
+        )
 
         query_norm = math.sqrt(
             sum(
@@ -1616,12 +1623,18 @@ class CodeIndexer:
 
             if query_text:
                 combined_score = (
-                    0.62 * similarity
-                    + 0.30 * lexical_score
-                    + implementation_score
-                    + symbol_score
-                    + contextual_role_score
+                    strategy.similarity_weight
+                    * similarity
+                    + strategy.lexical_weight
+                    * lexical_score
+                    + strategy.implementation_weight
+                    * implementation_score
+                    + strategy.symbol_weight
+                    * symbol_score
+                    + strategy.contextual_weight
+                    * contextual_role_score
                 )
+
             else:
                 combined_score = similarity
 
@@ -1640,6 +1653,8 @@ class CodeIndexer:
                     "symbol_name": row["symbol_name"],
                     "symbol_type": row["symbol_type"],
                     "component_role": component_role,
+                    "query_intent": query_intent,
+                    "retrieval_strategy": strategy.name,
                     "content": row["content"],
                     "similarity": similarity,
                     "lexical_score": lexical_score,
