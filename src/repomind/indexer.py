@@ -8,6 +8,9 @@ from repomind.roles import ComponentRoleClassifier
 from repomind.retrieval_strategy import (
     get_retrieval_strategy,
 )
+from repomind.retrieval_explanation import (
+    build_ranking_explanation,
+)
 
 
 class CodeIndexer:
@@ -1644,6 +1647,19 @@ class CodeIndexer:
                     symbol_name=row["symbol_name"],
                 )
             )
+            ranking_explanation = (
+                build_ranking_explanation(
+                    similarity=similarity,
+                    lexical_score=lexical_score,
+                    implementation_score=implementation_score,
+                    symbol_score=symbol_score,
+                    contextual_role_score=contextual_role_score,
+                    strategy=strategy,
+                    query_text=query_text,
+                    component_role=component_role,
+                )
+            )
+
 
             results.append(
                 {
@@ -1655,6 +1671,7 @@ class CodeIndexer:
                     "component_role": component_role,
                     "query_intent": query_intent,
                     "retrieval_strategy": strategy.name,
+                    "ranking_explanation": ranking_explanation,
                     "content": row["content"],
                     "similarity": similarity,
                     "lexical_score": lexical_score,

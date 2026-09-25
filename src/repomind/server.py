@@ -811,7 +811,32 @@ def semantic_search(
             f"   Combined score: "
             f"{relevance_score:.4f}"
         )
+        explanation = result.get(
+            "ranking_explanation"
+        )
 
+        if explanation:
+            lines.append(
+                "   Ranking explanation:"
+            )
+
+            for contributor in explanation.get(
+                "top_contributors",
+                [],
+            ):
+                lines.append(
+                    f"      - "
+                    f"{contributor['factor']} "
+                    f"(+{contributor['contribution']:.4f})"
+                )
+
+            if explanation.get(
+                "architecture_role_match"
+            ):
+                lines.append(
+                    "      - architecture role matches "
+                    "the query"
+                )
         lines.append(
             "   Code:"
         )
