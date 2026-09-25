@@ -11,7 +11,9 @@ from repomind.retrieval_strategy import (
 from repomind.retrieval_explanation import (
     build_ranking_explanation,
 )
-
+from repomind.retrieval_diversification import (
+    diversify_results,
+)
 
 class CodeIndexer:
     """Persistent SQLite index for repository code intelligence."""
@@ -1693,4 +1695,7 @@ class CodeIndexer:
             reverse=True,
         )
 
-        return results[:max_results]
+        return diversify_results(
+            results,
+            max_results,
+        )
