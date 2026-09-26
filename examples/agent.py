@@ -2,15 +2,16 @@ import asyncio
 import json
 import os
 import sys
-
 from google import genai
 from google.genai import types
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from repomind.agentic_retrieval import (
+    evaluate_retrieval,
+)
 
-
-MODEL = "gemini-2.5-flash"
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 MAX_TOOL_CALLS_PER_TURN = 8
 
@@ -21,7 +22,7 @@ SEMANTIC_TOOL_NAME = "semantic_search"
 VERIFICATION_TOOL_NAME = "read_file"
 
 MAX_VERIFICATION_READS = 2
-
+MAX_SEMANTIC_RETRIEVAL_PASSES = 2
 HIGH_RISK_QUERY_MARKERS = (
     "security",
     "secure",
@@ -605,6 +606,7 @@ async def execute_tool_call(
     session,
     function_call,
     trace,
+    arguments_override=None,
 ):
     """
     Execute a Gemini-requested MCP tool call.
@@ -614,7 +616,14 @@ async def execute_tool_call(
     """
 
     tool_name = function_call.name
-    tool_args = dict(function_call.args or {})
+    tool_args = dict(
+        function_call.args or {}
+    )
+
+    if arguments_override is not None:
+        tool_args.update(
+            arguments_override
+        )
 
     print(
         f"\n[Tool {trace.call_count + 1}]"
@@ -818,6 +827,8 @@ async def run_agent_turn(
     verification_reads = 0
     verification_complete = False
     first_generation = True
+    semantic_retrieval_passes = 0
+    semantic_retry_query = None
     
     semantic_first = (
         is_semantic_query(user_query)
@@ -855,16 +866,32 @@ async def run_agent_turn(
 
         forced_tool_name = None
 
-        if semantic_first and first_generation:
-            forced_tool_name = SEMANTIC_TOOL_NAME
+        if (
+            semantic_first
+            and first_generation
+        ):
+            forced_tool_name = (
+                SEMANTIC_TOOL_NAME
+            )
+
+        elif (
+            semantic_retry_query is not None
+            and semantic_retrieval_passes
+            < MAX_SEMANTIC_RETRIEVAL_PASSES
+        ):
+            forced_tool_name = (
+                SEMANTIC_TOOL_NAME
+            )
 
         elif (
             verification_required
             and not verification_complete
-            and verification_reads < MAX_VERIFICATION_READS
+            and verification_reads
+            < MAX_VERIFICATION_READS
         ):
-            forced_tool_name = VERIFICATION_TOOL_NAME
-
+            forced_tool_name = (
+                VERIFICATION_TOOL_NAME
+            )
         response = await generate_with_retry(
             gemini,
             contents,
@@ -874,6 +901,9 @@ async def run_agent_turn(
 
         first_generation = False
 
+        function_calls = extract_function_calls(
+            response
+)
         # ---------------------------------------------------------
         # Gemini has produced the final response.
         # ---------------------------------------------------------
@@ -956,11 +986,25 @@ async def run_agent_turn(
 
                 return trace    
 
+            tool_arguments_override = None
+
+            if (
+                function_call.name
+                == SEMANTIC_TOOL_NAME
+                and semantic_retry_query is not None
+            ):
+                tool_arguments_override = {
+                    "query": semantic_retry_query,
+                    "max_results": 5,
+                    "min_similarity": 0.0,
+                }
+
             tool_result = (
                 await execute_tool_call(
                     session,
                     function_call,
                     trace,
+                    arguments_override=tool_arguments_override,
                 )
             )
             if (
@@ -977,7 +1021,53 @@ async def run_agent_turn(
                 print(
                     "\n[Tool status] SUCCESS"
                 )
+            if (
+                tool_result["ok"]
+                and function_call.name
+                == SEMANTIC_TOOL_NAME
+            ):
+                semantic_retrieval_passes += 1
 
+                if (
+                    semantic_retrieval_passes
+                    < MAX_SEMANTIC_RETRIEVAL_PASSES
+                    and semantic_retry_query is None
+                ):
+                    escalation = (
+                        evaluate_retrieval(
+                            user_query,
+                            tool_result["result"],
+                        )
+                    )
+
+                    if escalation.should_retry:
+                        semantic_retry_query = (
+                            escalation.next_query
+                        )
+
+                        print(
+                            "\n[Agentic retrieval]"
+                        )
+
+                        print(
+                            f"  Confidence: "
+                            f"{escalation.confidence_score:.2f} "
+                            f"({escalation.confidence_level})"
+                        )
+
+                        print(
+                            "  Low confidence detected."
+                        )
+
+                        print(
+                            "  Starting second semantic "
+                            "retrieval pass."
+                        )
+
+                        print(
+                            f"  Query: "
+                            f"{semantic_retry_query}"
+                        )
             else:
 
                 print(
