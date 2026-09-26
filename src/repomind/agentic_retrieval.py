@@ -4,8 +4,9 @@ import re
 from dataclasses import dataclass
 
 from repomind.query_intent import QueryIntentClassifier
-
-
+from repomind.query_reformulation import (
+    reformulate_query,
+)
 CONFIDENCE_THRESHOLD = 0.45
 
 
@@ -136,10 +137,13 @@ def evaluate_retrieval(
             ),
         )
 
-    next_query = build_second_pass_query(
+    reformulated = reformulate_query(
         query
     )
 
+    next_query = (
+        reformulated.reformulated_query
+    )
     if next_query == query:
         return RetrievalEscalation(
             should_retry=False,
