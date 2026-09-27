@@ -790,16 +790,14 @@ async def run_agent_turn(
     user_query,
 ):
     """
-    Run one complete agent turn.
+    Run one complete RepoMind agent turn.
 
-    This includes:
-    - adding the user message
-    - Gemini tool selection
-    - MCP tool execution
-    - tool result handling
-    - multi-step reasoning
-    - transient Gemini retry
-    - final response
+    Supports:
+    - semantic-first routing
+    - confidence-triggered second-pass retrieval
+    - high-risk verification
+    - multi-tool Gemini turns
+    - Gemini retry handling
     """
 
     contents.append(
@@ -814,34 +812,31 @@ async def run_agent_turn(
     )
 
     trace = AgentTrace()
-    semantic_first = (
-        is_semantic_query(user_query)
-        and any(
-            declaration.name == SEMANTIC_TOOL_NAME
-            for tool in gemini_tools
-            for declaration in tool.function_declarations or []
-        )
-    )
 
-    verification_required = is_high_risk_query(user_query)
-    verification_reads = 0
-    verification_complete = False
-    first_generation = True
-    semantic_retrieval_passes = 0
-    semantic_retry_query = None
-    
     semantic_first = (
         is_semantic_query(user_query)
         and any(
-            declaration.name == SEMANTIC_TOOL_NAME
+            declaration.name
+            == SEMANTIC_TOOL_NAME
             for tool in gemini_tools
             for declaration in (
-                tool.function_declarations or []
+                tool.function_declarations
+                or []
             )
         )
     )
 
+    verification_required = (
+        is_high_risk_query(user_query)
+    )
+
+    verification_reads = 0
+    verification_complete = False
+
     first_generation = True
+
+    semantic_retrieval_passes = 0
+    semantic_retry_query = None
 
     while True:
 
@@ -866,6 +861,10 @@ async def run_agent_turn(
 
         forced_tool_name = None
 
+        # ---------------------------------------------------------
+        # First semantic retrieval
+        # ---------------------------------------------------------
+
         if (
             semantic_first
             and first_generation
@@ -874,14 +873,23 @@ async def run_agent_turn(
                 SEMANTIC_TOOL_NAME
             )
 
+        # ---------------------------------------------------------
+        # Confidence-triggered second retrieval
+        # ---------------------------------------------------------
+
         elif (
-            semantic_retry_query is not None
+            semantic_retry_query
+            is not None
             and semantic_retrieval_passes
             < MAX_SEMANTIC_RETRIEVAL_PASSES
         ):
             forced_tool_name = (
                 SEMANTIC_TOOL_NAME
             )
+
+        # ---------------------------------------------------------
+        # High-risk source verification
+        # ---------------------------------------------------------
 
         elif (
             verification_required
@@ -892,6 +900,7 @@ async def run_agent_turn(
             forced_tool_name = (
                 VERIFICATION_TOOL_NAME
             )
+
         response = await generate_with_retry(
             gemini,
             contents,
@@ -901,11 +910,14 @@ async def run_agent_turn(
 
         first_generation = False
 
-        function_calls = extract_function_calls(
-            response
-)
+        function_calls = (
+            extract_function_calls(
+                response
+            )
+        )
+
         # ---------------------------------------------------------
-        # Gemini has produced the final response.
+        # No function call -> final answer
         # ---------------------------------------------------------
 
         if not function_calls:
@@ -927,13 +939,10 @@ async def run_agent_turn(
             )
 
             if response.text:
-
                 print(
                     response.text
                 )
-
             else:
-
                 print(
                     "Gemini did not return "
                     "a text response."
@@ -946,7 +955,7 @@ async def run_agent_turn(
             return trace
 
         # ---------------------------------------------------------
-        # Preserve Gemini's tool-call response.
+        # Preserve Gemini's function-call response
         # ---------------------------------------------------------
 
         if response.candidates:
@@ -962,7 +971,7 @@ async def run_agent_turn(
                 )
 
         # ---------------------------------------------------------
-        # Execute every requested MCP tool.
+        # Execute requested MCP tools
         # ---------------------------------------------------------
 
         for function_call in function_calls:
@@ -981,17 +990,22 @@ async def run_agent_turn(
                 )
 
                 await print_agent_trace(
-                    trace 
+                    trace
                 )
 
-                return trace    
+                return trace
 
             tool_arguments_override = None
+
+            # -----------------------------------------------------
+            # Apply automatic second-pass semantic query
+            # -----------------------------------------------------
 
             if (
                 function_call.name
                 == SEMANTIC_TOOL_NAME
-                and semantic_retry_query is not None
+                and semantic_retry_query
+                is not None
             ):
                 tool_arguments_override = {
                     "query": semantic_retry_query,
@@ -1004,35 +1018,69 @@ async def run_agent_turn(
                     session,
                     function_call,
                     trace,
-                    arguments_override=tool_arguments_override,
+                    arguments_override=(
+                        tool_arguments_override
+                    ),
                 )
             )
+
+            # -----------------------------------------------------
+            # Verification tracking
+            # -----------------------------------------------------
+
             if (
                 verification_required
-                and function_call.name == VERIFICATION_TOOL_NAME
+                and function_call.name
+                == VERIFICATION_TOOL_NAME
             ):
                 verification_reads += 1
 
                 if tool_result["ok"]:
                     verification_complete = True
 
+            # -----------------------------------------------------
+            # Tool status
+            # -----------------------------------------------------
+
             if tool_result["ok"]:
 
                 print(
                     "\n[Tool status] SUCCESS"
                 )
+
+            else:
+
+                print(
+                    "\n[Tool status] "
+                    "ERROR - agent may recover"
+                )
+
+            # -----------------------------------------------------
+            # Evaluate semantic retrieval confidence
+            # -----------------------------------------------------
+
             if (
                 tool_result["ok"]
                 and function_call.name
                 == SEMANTIC_TOOL_NAME
             ):
+
                 semantic_retrieval_passes += 1
 
+                # We just executed the pending second pass.
                 if (
+                    semantic_retry_query
+                    is not None
+                ):
+                    semantic_retry_query = None
+
+                # First semantic pass can trigger
+                # an automatic second pass.
+                elif (
                     semantic_retrieval_passes
                     < MAX_SEMANTIC_RETRIEVAL_PASSES
-                    and semantic_retry_query is None
                 ):
+
                     escalation = (
                         evaluate_retrieval(
                             user_query,
@@ -1041,6 +1089,7 @@ async def run_agent_turn(
                     )
 
                     if escalation.should_retry:
+
                         semantic_retry_query = (
                             escalation.next_query
                         )
@@ -1060,29 +1109,42 @@ async def run_agent_turn(
                         )
 
                         print(
-                            "  Starting second semantic "
-                            "retrieval pass."
+                            "  Starting second "
+                            "semantic retrieval pass."
                         )
 
                         print(
                             f"  Query: "
                             f"{semantic_retry_query}"
                         )
-            else:
 
-                print(
-                    "\n[Tool status] "
-                    "ERROR - agent may recover"
+            # -----------------------------------------------------
+            # Send function result back to Gemini
+            #
+            # NOTE: The installed google-genai SDK's
+            # Part.from_function_response() does not accept an
+            # `id` keyword argument (verified via
+            # inspect.signature). Passing one raises:
+            #   TypeError: Part.from_function_response() got an
+            #   unexpected keyword argument 'id'
+            # Since forced tool calls in this agent are issued one
+            # at a time (ToolConfig mode="ANY" with a single
+            # allowed function name), matching by `name` alone is
+            # sufficient and no `id` is required here.
+            # -----------------------------------------------------
+
+            function_response = (
+                types.Part.from_function_response(
+                    name=function_call.name,
+                    response=tool_result,
                 )
+            )
 
             contents.append(
                 types.Content(
-                    role="tool",
+                    role="user",
                     parts=[
-                        types.Part.from_function_response(
-                            name=function_call.name,
-                            response=tool_result,
-                        )
+                        function_response
                     ],
                 )
             )
