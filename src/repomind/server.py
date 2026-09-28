@@ -15,9 +15,12 @@ from repomind.query_intent import (
 from repomind.context_packer import (
     pack_context,
 )
+from repomind.retrieval_cache import (
+    RetrievalCache,
+)
 
 mcp = FastMCP("RepoMind")
-
+retrieval_cache = RetrievalCache()
 
 def get_repository() -> Repository:
     """
@@ -500,11 +503,11 @@ def index_repository() -> str:
                 # -------------------------------------------------
 
                 chunk_texts = [
-                chunker.build_embedding_text(
-                    chunk
-                )
-                for chunk in chunks
-            ]
+                    chunker.build_embedding_text(
+                        chunk
+                    )
+                    for chunk in chunks
+                ]
 
                 embeddings = (
                     embedding_engine.embed_documents(
@@ -642,6 +645,12 @@ def index_repository() -> str:
     finally:
         embedding_engine.close()
 
+    if (
+        indexed_files > 0
+        or deleted_files > 0
+    ):
+        retrieval_cache.clear()
+
     stats = indexer.get_stats()
 
     return (
@@ -777,6 +786,34 @@ def get_dependencies(
     return "\n".join(lines)
 
 @mcp.tool()
+def retrieval_cache_stats() -> str:
+    """
+    Return semantic retrieval cache statistics.
+    """
+
+    stats = retrieval_cache.stats()
+
+    embedding = stats["embedding"]
+    results = stats["results"]
+
+    return (
+        "Retrieval cache statistics\n"
+        "---------------------------\n"
+        "Embedding cache:\n"
+        f"  Size: {embedding['size']}\n"
+        f"  Max size: {embedding['max_size']}\n"
+        f"  Hits: {embedding['hits']}\n"
+        f"  Misses: {embedding['misses']}\n"
+        f"  Evictions: {embedding['evictions']}\n\n"
+        "Result cache:\n"
+        f"  Size: {results['size']}\n"
+        f"  Max size: {results['max_size']}\n"
+        f"  Hits: {results['hits']}\n"
+        f"  Misses: {results['misses']}\n"
+        f"  Evictions: {results['evictions']}"
+    )   
+
+@mcp.tool()
 def semantic_search(
     query: str,
     max_results: int = 5,
@@ -817,36 +854,90 @@ def semantic_search(
             "Run index_repository() first."
         )
 
-    try:
-        embedding_engine = EmbeddingEngine()
+    repository_key = str(
+        repository.root
+    )
+
+    # -------------------------------------------------
+    # Query embedding (cached)
+    # -------------------------------------------------
+
+    embedding_key = (
+        retrieval_cache.build_embedding_key(
+            repository_key,
+            query,
+        )
+    )
+
+    query_embedding = (
+        retrieval_cache.get_embedding(
+            embedding_key
+        )
+    )
+
+    if query_embedding is None:
 
         try:
-            query_embedding = (
-                embedding_engine.embed_query(
-                    query
+            embedding_engine = EmbeddingEngine()
+
+            try:
+                query_embedding = (
+                    embedding_engine.embed_query(
+                        query
+                    )
                 )
+
+            finally:
+                embedding_engine.close()
+
+        except Exception as error:
+            return (
+                f"Semantic embedding error: {error}"
             )
 
-        finally:
-            embedding_engine.close()
-
-    except Exception as error:
-        return (
-            f"Semantic embedding error: {error}"
+        retrieval_cache.set_embedding(
+            embedding_key,
+            query_embedding,
         )
 
-    try:
-        results = indexer.semantic_search(
-            query_embedding=query_embedding,
-            max_results=max_results,
-            min_similarity=min_similarity,
-            query_text=query,
-            query_intent=intent.name,
-        )
+    # -------------------------------------------------
+    # Search results (cached)
+    # -------------------------------------------------
 
-    except ValueError as error:
-        return (
-            f"Semantic search error: {error}"
+    result_key = (
+        retrieval_cache.build_result_key(
+            repository_key,
+            query,
+            intent.name,
+            max_results,
+            min_similarity,
+        )
+    )
+
+    results = retrieval_cache.get_results(
+        result_key
+    )
+
+    # Only perform the actual search when the cache missed.
+    if results is None:
+
+        try:
+            results = indexer.semantic_search(
+                query_embedding=query_embedding,
+                max_results=max_results,
+                min_similarity=min_similarity,
+                query_text=query,
+                query_intent=intent.name,
+            )
+
+        except ValueError as error:
+            return (
+                f"Semantic search error: {error}"
+            )
+
+        retrieval_cache.set_results(
+            result_key,
+            results,
         )
 
     if not results:
