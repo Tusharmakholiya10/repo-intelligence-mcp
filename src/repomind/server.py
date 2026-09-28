@@ -12,7 +12,9 @@ from repomind.embeddings import EmbeddingEngine
 from repomind.query_intent import (
     QueryIntentClassifier,
 )
-
+from repomind.context_packer import (
+    pack_context,
+)
 
 mcp = FastMCP("RepoMind")
 
@@ -30,7 +32,115 @@ def get_repository() -> Repository:
 
     return Repository(repo_path)
 
+@mcp.tool()
+def build_context(
+    path: str,
+    symbol_name: str | None = None,
+    max_usages: int = 5,
+    max_dependencies: int = 5,
+    max_related_symbols: int = 5,
+    context_lines: int = 12,
+    max_chars: int = 12000,
+) -> str:
+    """
+    Build a compact agent-ready context bundle for a repository location.
 
+    Combines:
+    - primary source context
+    - related symbols
+    - indexed usages
+    - local dependencies
+
+    The result is deterministic and does not require an LLM call.
+    """
+
+    if max_usages < 0:
+        return "max_usages must be non-negative."
+
+    if max_dependencies < 0:
+        return (
+            "max_dependencies must be non-negative."
+        )
+
+    if max_related_symbols < 0:
+        return (
+            "max_related_symbols must be non-negative."
+        )
+
+    if context_lines < 0:
+        return "context_lines must be non-negative."
+
+    repository = get_repository()
+
+    try:
+        source = repository.read_file(
+            path
+        )
+
+        analyzer = PythonAnalyzer(
+            repository.root
+        )
+
+        indexer = CodeIndexer(
+            repository.root
+        )
+
+        symbols = analyzer.analyze_file(
+            path
+        )
+
+        usage_symbol = (
+            symbol_name.rsplit(".", 1)[-1]
+            if symbol_name
+            else None
+        )
+
+        usages = (
+            indexer.find_usages(
+                usage_symbol,
+                max_usages,
+            )
+            if usage_symbol and max_usages > 0
+            else []
+        )
+
+        dependencies = (
+            indexer.get_dependencies(
+                path,
+                max_dependencies,
+            )
+            if max_dependencies > 0
+            else []
+        )
+
+        packed = pack_context(
+            path=path,
+            symbol_name=symbol_name,
+            source=source,
+            symbols=symbols,
+            usages=usages,
+            dependencies=dependencies,
+            max_chars=max_chars,
+            context_lines=context_lines,
+            max_related=max_related_symbols,
+        )
+
+        return (
+            f"Context for: {path}\n"
+            f"Symbol: "
+            f"{packed.symbol_name or '<file-level context>'}\n"
+            f"Characters: "
+            f"{packed.total_characters}\n"
+            f"Truncated: "
+            f"{packed.truncated}\n\n"
+            f"{packed.content}"
+        )
+
+    except ValueError as error:
+        return (
+            f"Context building error: {error}"
+        )
+    
 @mcp.tool()
 def get_git_history(
     max_results: int = 10,

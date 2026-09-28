@@ -16,7 +16,7 @@ MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_TOOL_CALLS_PER_TURN = 8
 
 MAX_GEMINI_RETRIES = 3
-
+CONTEXT_TOOL_NAME = "build_context"
 GEMINI_RETRY_DELAYS = [2, 4, 8]
 SEMANTIC_TOOL_NAME = "semantic_search"
 VERIFICATION_TOOL_NAME = "read_file"
@@ -334,6 +334,22 @@ read_file to inspect the most relevant file when necessary.
 Always base answers on repository evidence returned by tools.
 Do not claim that functionality does not exist merely because
 one search returned no results.
+
+Use build_context when semantic_search identifies a relevant
+repository path and symbol and the question requires understanding
+the implementation together with its related usages or dependencies.
+
+build_context should generally be preferred over making separate
+read_file, find_usages, and get_dependencies calls when one compact
+repository context is sufficient.
+
+For conceptual questions:
+
+semantic_search
+    ↓
+build_context
+    ↓
+answer
 
 """
 
