@@ -49,7 +49,11 @@ class Repository:
 
     MAX_FILE_SIZE = 1_000_000  # 1 MB
 
-    def __init__(self, path: str):
+    def __init__(
+        self,
+        path: str,
+        max_file_size: int | None = None,
+    ):
         """Initialize the repository."""
 
         self.root = Path(path).resolve()
@@ -63,6 +67,17 @@ class Repository:
             raise ValueError(
                 f"Repository path is not a directory: {self.root}"
             )
+
+        if max_file_size is not None:
+            if max_file_size <= 0:
+                raise ValueError(
+                    "max_file_size must be greater than 0."
+                )
+
+            self.max_file_size = max_file_size
+
+        else:
+            self.max_file_size = self.MAX_FILE_SIZE
 
     def _is_ignored(self, path: Path) -> bool:
         """Check whether a path belongs to an ignored directory or file."""
@@ -171,10 +186,10 @@ class Repository:
 
         file_size = path.stat().st_size
 
-        if file_size > self.MAX_FILE_SIZE:
+        if file_size > self.max_file_size:
             raise ValueError(
                 f"File is too large. Maximum allowed "
-                f"size is {self.MAX_FILE_SIZE} bytes."
+                f"size is {self.max_file_size} bytes."
             )
 
         try:

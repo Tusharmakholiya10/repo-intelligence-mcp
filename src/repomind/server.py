@@ -18,22 +18,32 @@ from repomind.context_packer import (
 from repomind.retrieval_cache import (
     RetrievalCache,
 )
+from repomind.config import (
+    ConfigError,
+    RepoMindConfig,
+)
 
 mcp = FastMCP("RepoMind")
 retrieval_cache = RetrievalCache()
 
+def get_config() -> RepoMindConfig:
+    """
+    Load and validate RepoMind runtime configuration.
+    """
+    return RepoMindConfig.from_env()
+
+
 def get_repository() -> Repository:
     """
-    Create a Repository instance from the configured
-    REPOMIND_REPO environment variable.
+    Create a Repository instance from validated configuration.
     """
 
-    repo_path = os.getenv(
-        "REPOMIND_REPO",
-        ".",
-    )
+    config = get_config()
 
-    return Repository(repo_path)
+    return Repository(
+        str(config.repo_path),
+        max_file_size=config.max_file_size,
+    )
 
 @mcp.tool()
 def build_context(
@@ -372,7 +382,12 @@ def index_repository() -> str:
     new, modified, or not-yet-semantically-indexed files.
     """
 
-    repository = get_repository()
+    config = get_config()
+
+    repository = Repository(
+        str(config.repo_path),
+        max_file_size=config.max_file_size,
+    )
 
     analyzer = PythonAnalyzer(
         repository.root
@@ -385,7 +400,14 @@ def index_repository() -> str:
     chunker = CodeChunker()
 
     try:
-        embedding_engine = EmbeddingEngine()
+        embedding_engine = EmbeddingEngine(
+            api_key=config.require_gemini_api_key()
+        )
+
+    except ConfigError as error:
+        return (
+            f"Semantic indexing unavailable: {error}"
+        )
 
     except ValueError as error:
         return (
@@ -840,8 +862,16 @@ def semantic_search(
         query
     )
 
-    repository = get_repository()
+    try:
+        config = get_config()
 
+    except ConfigError as error:
+        return f"Configuration error: {error}"
+
+    repository = Repository(
+        str(config.repo_path),
+        max_file_size=config.max_file_size,
+    )
     indexer = CodeIndexer(
         repository.root
     )
@@ -878,7 +908,9 @@ def semantic_search(
     if query_embedding is None:
 
         try:
-            embedding_engine = EmbeddingEngine()
+            embedding_engine = EmbeddingEngine(
+                api_key=config.require_gemini_api_key()
+            )
 
             try:
                 query_embedding = (
