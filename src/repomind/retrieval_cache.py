@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ class CacheEntry:
 
 
 class TTLCache:
-    """Small thread-safe-independent TTL + LRU cache."""
+    """Small thread-safe TTL + LRU cache."""
 
     def __init__(
         self,
@@ -34,7 +35,10 @@ class TTLCache:
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
 
-        self._entries = OrderedDict()
+        self._entries: OrderedDict[str, CacheEntry] = (
+            OrderedDict()
+        )
+        self._lock = threading.RLock()
 
         self.hits = 0
         self.misses = 0
@@ -53,71 +57,68 @@ class TTLCache:
     def get(
         self,
         key: str,
-    ):
-        now = time.monotonic()
+    ) -> Any | None:
+        with self._lock:
+            now = time.monotonic()
 
-        entry = self._entries.get(
-            key
-        )
+            entry = self._entries.get(key)
 
-        if entry is None:
-            self.misses += 1
-            return None
+            if entry is None:
+                self.misses += 1
+                return None
 
-        if self._is_expired(
-            entry,
-            now,
-        ):
-            del self._entries[key]
-            self.misses += 1
-            return None
+            if self._is_expired(
+                entry,
+                now,
+            ):
+                del self._entries[key]
+                self.misses += 1
+                return None
 
-        self._entries.move_to_end(
-            key
-        )
+            # Move the accessed item to the end so that
+            # the first item remains the least-recently-used.
+            self._entries.move_to_end(key)
 
-        self.hits += 1
+            self.hits += 1
 
-        return copy.deepcopy(
-            entry.value
-        )
+            # Return a deep copy so callers cannot mutate
+            # the object stored inside the cache.
+            return copy.deepcopy(entry.value)
 
     def set(
         self,
         key: str,
-        value,
+        value: Any,
     ) -> None:
-        now = time.monotonic()
+        with self._lock:
+            now = time.monotonic()
 
-        self._entries[key] = CacheEntry(
-            value=copy.deepcopy(value),
-            created_at=now,
-        )
-
-        self._entries.move_to_end(
-            key
-        )
-
-        while (
-            len(self._entries)
-            > self.max_size
-        ):
-            self._entries.popitem(
-                last=False
+            self._entries[key] = CacheEntry(
+                value=copy.deepcopy(value),
+                created_at=now,
             )
-            self.evictions += 1
+
+            self._entries.move_to_end(key)
+
+            # Remove the least-recently-used entries
+            # until the cache is back within its limit.
+            while len(self._entries) > self.max_size:
+                self._entries.popitem(last=False)
+                self.evictions += 1
 
     def clear(self) -> None:
-        self._entries.clear()
+        with self._lock:
+            self._entries.clear()
 
     def stats(self) -> dict[str, int]:
-        return {
-            "size": len(self._entries),
-            "max_size": self.max_size,
-            "hits": self.hits,
-            "misses": self.misses,
-            "evictions": self.evictions,
-        }
+        with self._lock:
+            return {
+                "size": len(self._entries),
+                "max_size": self.max_size,
+                "hits": self.hits,
+                "misses": self.misses,
+                "evictions": self.evictions,
+            }
 
 
 class RetrievalCache:
@@ -142,6 +143,13 @@ class RetrievalCache:
     def normalize_query(
         query: str,
     ) -> str:
+        """
+        Normalize a query for stable cache-key generation.
+
+        Leading/trailing whitespace is removed,
+        repeated whitespace is collapsed, and the
+        query is converted to lowercase.
+        """
         return " ".join(
             query.strip().lower().split()
         )
@@ -151,6 +159,9 @@ class RetrievalCache:
         repository_root: str,
         query: str,
     ) -> str:
+        """
+        Build a stable cache key for query embeddings.
+        """
         normalized = self.normalize_query(
             query
         )
@@ -169,6 +180,13 @@ class RetrievalCache:
         max_results: int,
         min_similarity: float,
     ) -> str:
+        """
+        Build a stable cache key for semantic-search results.
+
+        Search configuration is part of the key so that
+        different retrieval settings cannot reuse the
+        wrong cached result set.
+        """
         normalized = self.normalize_query(
             query
         )
@@ -185,16 +203,20 @@ class RetrievalCache:
     def get_embedding(
         self,
         key: str,
-    ):
-        return self.embedding_cache.get(
-            key
-        )
+    ) -> list[float] | None:
+        """
+        Retrieve a cached query embedding.
+        """
+        return self.embedding_cache.get(key)
 
     def set_embedding(
         self,
         key: str,
         embedding: list[float],
     ) -> None:
+        """
+        Store a query embedding in the cache.
+        """
         self.embedding_cache.set(
             key,
             embedding,
@@ -203,31 +225,37 @@ class RetrievalCache:
     def get_results(
         self,
         key: str,
-    ):
-        return self.result_cache.get(
-            key
-        )
+    ) -> list[dict] | None:
+        """
+        Retrieve cached semantic-search results.
+        """
+        return self.result_cache.get(key)
 
     def set_results(
         self,
         key: str,
         results: list[dict],
     ) -> None:
+        """
+        Store semantic-search results in the cache.
+        """
         self.result_cache.set(
             key,
             results,
         )
 
     def clear(self) -> None:
+        """
+        Clear both embedding and result caches.
+        """
         self.embedding_cache.clear()
         self.result_cache.clear()
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, dict[str, int]]:
+        """
+        Return statistics for both cache layers.
+        """
         return {
-            "embedding": (
-                self.embedding_cache.stats()
-            ),
-            "results": (
-                self.result_cache.stats()
-            ),
+            "embedding": self.embedding_cache.stats(),
+            "results": self.result_cache.stats(),
         }
