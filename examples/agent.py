@@ -10,6 +10,10 @@ from mcp.client.stdio import stdio_client
 from repomind.agentic_retrieval import (
     evaluate_retrieval,
 )
+from repomind.config import (
+    ConfigError,
+    RepoMindConfig,
+)
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
@@ -1274,19 +1278,23 @@ async def print_index_stats(session):
 async def main():
     """Start the interactive RepoMind AI agent."""
 
-    api_key = os.getenv(
-        "GEMINI_API_KEY"
-    )
+    try:
+        config = RepoMindConfig.from_env()
+        api_key = config.require_gemini_api_key()
 
-    if not api_key:
-
+    except ConfigError as error:
         raise RuntimeError(
-            "GEMINI_API_KEY environment "
-            "variable is not set."
-        )
+            f"Invalid RepoMind configuration: {error}"
+        ) from error
+
+    global MODEL
+    MODEL = config.gemini_model
 
     gemini = genai.Client(
-        api_key=api_key
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=config.http_timeout_ms,
+        ),
     )
 
     server_params = StdioServerParameters(

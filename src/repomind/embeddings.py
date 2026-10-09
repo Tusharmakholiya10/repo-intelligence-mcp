@@ -22,12 +22,19 @@ class EmbeddingEngine:
     MAX_RETRIES = 3
     DEFAULT_RETRY_DELAY = 60.0
 
-    def __init__(self, api_key: str | None = None):
+    DEFAULT_TIMEOUT_MS = 30_000
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout_ms: int | None = None,
+    ):
         """
         Initialize the Gemini embedding client.
 
-        The API key is read from GEMINI_API_KEY when not
-        explicitly provided.
+        Args:
+            api_key: Optional explicit Gemini API key.
+            timeout_ms: HTTP request timeout in milliseconds.
         """
 
         self.api_key = (
@@ -41,8 +48,28 @@ class EmbeddingEngine:
                 "is not set."
             )
 
+        resolved_timeout_ms = (
+            self.DEFAULT_TIMEOUT_MS
+            if timeout_ms is None
+            else timeout_ms
+        )
+
+        if (
+            isinstance(resolved_timeout_ms, bool)
+            or not isinstance(resolved_timeout_ms, int)
+            or resolved_timeout_ms <= 0
+        ):
+            raise ValueError(
+                "timeout_ms must be a positive integer."
+            )
+
+        self.timeout_ms = resolved_timeout_ms
+
         self.client = genai.Client(
-            api_key=self.api_key
+            api_key=self.api_key,
+            http_options=types.HttpOptions(
+                timeout=self.timeout_ms,
+            ),
         )
 
     # ------------------------------------------------------------------

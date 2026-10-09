@@ -401,7 +401,8 @@ def index_repository() -> str:
 
     try:
         embedding_engine = EmbeddingEngine(
-            api_key=config.require_gemini_api_key()
+            api_key=config.require_gemini_api_key(),
+            timeout_ms=config.http_timeout_ms,
         )
 
     except ConfigError as error:

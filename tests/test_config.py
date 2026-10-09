@@ -223,3 +223,72 @@ def test_max_file_size_upper_bound(
                 ),
             }
         )
+
+def test_default_http_timeout(tmp_path: Path):
+    config = RepoMindConfig.from_env(
+        {
+            "REPOMIND_REPO": str(tmp_path),
+        }
+    )
+
+    assert (
+        config.http_timeout_ms
+        == RepoMindConfig.DEFAULT_HTTP_TIMEOUT_MS
+    )
+
+
+def test_custom_http_timeout(tmp_path: Path):
+    config = RepoMindConfig.from_env(
+        {
+            "REPOMIND_REPO": str(tmp_path),
+            "REPOMIND_HTTP_TIMEOUT_MS": "45000",
+        }
+    )
+
+    assert config.http_timeout_ms == 45_000
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "abc",
+        "1.5",
+        "",
+        "0",
+        "-1",
+    ],
+)
+def test_invalid_http_timeout_values(
+    tmp_path: Path,
+    value: str,
+):
+    with pytest.raises(ConfigError):
+        RepoMindConfig.from_env(
+            {
+                "REPOMIND_REPO": str(tmp_path),
+                "REPOMIND_HTTP_TIMEOUT_MS": value,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "999",
+        "300001",
+    ],
+)
+def test_http_timeout_outside_allowed_range(
+    tmp_path: Path,
+    value: str,
+):
+    with pytest.raises(
+        ConfigError,
+        match="must be between",
+    ):
+        RepoMindConfig.from_env(
+            {
+                "REPOMIND_REPO": str(tmp_path),
+                "REPOMIND_HTTP_TIMEOUT_MS": value,
+            }
+        )

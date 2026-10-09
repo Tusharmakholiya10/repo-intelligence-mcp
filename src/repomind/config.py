@@ -31,12 +31,17 @@ class RepoMindConfig:
     REPOMIND_MAX_FILE_SIZE
         Maximum readable file size in bytes.
         Defaults to 1,000,000 (1 MB).
+
+    REPOMIND_HTTP_TIMEOUT_MS
+        Timeout for individual Gemini HTTP requests in milliseconds.
+        Defaults to 30,000 ms (30 seconds).
     """
 
     repo_path: Path
     gemini_api_key: str | None
     gemini_model: str
     max_file_size: int
+    http_timeout_ms: int
 
     DEFAULT_REPO_PATH = "."
     DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
@@ -44,6 +49,10 @@ class RepoMindConfig:
 
     MIN_FILE_SIZE = 1
     MAX_FILE_SIZE_LIMIT = 50_000_000
+
+    DEFAULT_HTTP_TIMEOUT_MS = 30_000
+    MIN_HTTP_TIMEOUT_MS = 1_000
+    MAX_HTTP_TIMEOUT_MS = 300_000
 
     @classmethod
     def from_env(
@@ -122,11 +131,31 @@ class RepoMindConfig:
                 f"{cls.MAX_FILE_SIZE_LIMIT} bytes."
             )
 
+        http_timeout_ms = cls._parse_positive_int(
+            source.get(
+                "REPOMIND_HTTP_TIMEOUT_MS",
+                str(cls.DEFAULT_HTTP_TIMEOUT_MS),
+            ),
+            "REPOMIND_HTTP_TIMEOUT_MS",
+        )
+
+        if not (
+            cls.MIN_HTTP_TIMEOUT_MS
+            <= http_timeout_ms
+            <= cls.MAX_HTTP_TIMEOUT_MS
+        ):
+            raise ConfigError(
+                "REPOMIND_HTTP_TIMEOUT_MS must be between "
+                f"{cls.MIN_HTTP_TIMEOUT_MS} and "
+                f"{cls.MAX_HTTP_TIMEOUT_MS} milliseconds."
+            )
+
         return cls(
             repo_path=repo_path,
             gemini_api_key=api_key,
             gemini_model=model,
             max_file_size=max_file_size,
+            http_timeout_ms=http_timeout_ms,
         )
 
     @staticmethod
