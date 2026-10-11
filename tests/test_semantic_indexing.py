@@ -382,3 +382,119 @@ def test_existing_database_is_migrated(
 
     assert stats["semantic_chunks"] == 1
     assert stats["semantic_indexed_files"] == 1
+
+
+
+def test_file_bundle_update_rolls_back_on_failure(tmp_path):
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+
+    source_file = repository_root / "example.py"
+    source_file.write_text(
+        "def old_function():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    indexer = CodeIndexer(repository_root)
+
+    old_symbol = {
+        "name": "old_function",
+        "qualified_name": "old_function",
+        "type": "function",
+        "line": 1,
+        "end_line": 2,
+    }
+
+    old_reference = {
+        "symbol_name": "old_function",
+        "line": 4,
+        "reference_type": "call",
+    }
+
+    old_chunk = {
+        "start_line": 1,
+        "end_line": 2,
+        "symbol_name": "old_function",
+        "symbol_type": "function",
+        "content": "def old_function(): return 1",
+        "embedding": [0.1, 0.2],
+    }
+
+    indexer.index_file_bundle(
+        relative_path="example.py",
+        language="python",
+        size=source_file.stat().st_size,
+        modified_time="2026-01-01T00:00:00",
+        symbols=[old_symbol],
+        references=[old_reference],
+        dependencies=[],
+        semantic_chunks=[old_chunk],
+    )
+
+    # The next update deletes and replaces several records
+    # within its transaction, but then fails on the empty embedding.
+    new_symbol = {
+        "name": "new_function",
+        "qualified_name": "new_function",
+        "type": "function",
+        "line": 1,
+        "end_line": 2,
+    }
+
+    bad_chunk = {
+        "start_line": 1,
+        "end_line": 2,
+        "symbol_name": "new_function",
+        "symbol_type": "function",
+        "content": "def new_function(): return 2",
+        "embedding": [],
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="missing embedding",
+    ):
+        indexer.index_file_bundle(
+            relative_path="example.py",
+            language="python",
+            size=source_file.stat().st_size,
+            modified_time="2026-01-02T00:00:00",
+            symbols=[new_symbol],
+            references=[],
+            dependencies=[],
+            semantic_chunks=[bad_chunk],
+        )
+
+    # The failed update must not replace the old index.
+    symbols = indexer.search_symbols(
+        "old_function",
+        max_results=10,
+    )
+    assert any(
+        item["qualified_name"] == "old_function"
+        for item in symbols
+    )
+
+    assert indexer.search_symbols(
+        "new_function",
+        max_results=10,
+    ) == []
+
+    assert indexer.find_usages(
+        "old_function",
+        max_results=10,
+    )
+
+    assert not indexer.find_usages(
+        "new_function",
+        max_results=10,
+    )
+
+    chunks = indexer.get_semantic_chunks("example.py")
+    assert len(chunks) == 1
+    assert chunks[0]["content"] == old_chunk["content"]
+
+    assert (
+        indexer.needs_semantic_reindex("example.py")
+        is False
+    )

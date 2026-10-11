@@ -371,6 +371,7 @@ def search_symbols(
     return "\n".join(lines)
 
 
+
 @mcp.tool()
 def index_repository() -> str:
     """
@@ -378,8 +379,10 @@ def index_repository() -> str:
 
     Only new or modified files are analyzed.
 
-    Semantic chunks are generated and embedded only for
-    new, modified, or not-yet-semantically-indexed files.
+    File metadata, symbols, references, dependencies, and semantic
+    chunks are persisted atomically for each successfully processed file.
+
+    File-level failures are reported without exposing raw provider errors.
     """
 
     config = get_config()
@@ -389,14 +392,8 @@ def index_repository() -> str:
         max_file_size=config.max_file_size,
     )
 
-    analyzer = PythonAnalyzer(
-        repository.root
-    )
-
-    indexer = CodeIndexer(
-        repository.root
-    )
-
+    analyzer = PythonAnalyzer(repository.root)
+    indexer = CodeIndexer(repository.root)
     chunker = CodeChunker()
 
     try:
@@ -404,15 +401,10 @@ def index_repository() -> str:
             api_key=config.require_gemini_api_key(),
             timeout_ms=config.http_timeout_ms,
         )
-
-    except ConfigError as error:
+    except (ConfigError, ValueError) as error:
         return (
-            f"Semantic indexing unavailable: {error}"
-        )
-
-    except ValueError as error:
-        return (
-            f"Semantic indexing unavailable: {error}"
+            "Semantic indexing unavailable: "
+            f"{error}"
         )
 
     indexed_files = 0
@@ -422,10 +414,10 @@ def index_repository() -> str:
     deleted_files = 0
     embedding_errors = 0
 
-    current_files = set()
+    file_failures: list[str] = []
+    current_files: set[str] = set()
 
     try:
-
         for path in repository.root.rglob("*.py"):
 
             if repository._is_ignored(path):
@@ -437,33 +429,37 @@ def index_repository() -> str:
 
             relative_path_str = str(
                 relative_path
-            ).replace(
-                "\\",
-                "/",
-            )
+            ).replace("\\", "/")
 
-            current_files.add(
-                relative_path_str
-            )
+            current_files.add(relative_path_str)
 
-            stat = path.stat()
+            # -------------------------------------------------
+            # Read file metadata safely.
+            # -------------------------------------------------
 
-            modified_time = (
-                datetime.fromtimestamp(
+            try:
+                stat = path.stat()
+
+                modified_time = datetime.fromtimestamp(
                     stat.st_mtime
                 ).isoformat()
-            )
 
-            # -------------------------------------------------
-            # Determine whether this file needs work.
-            # -------------------------------------------------
-
-            needs_code_reindex = (
-                indexer.needs_reindex(
-                    relative_path_str,
-                    stat.st_size,
-                    modified_time,
+            except OSError as error:
+                embedding_errors += 1
+                file_failures.append(
+                    f"{relative_path_str} "
+                    f"({type(error).__name__})"
                 )
+                continue
+
+            # -------------------------------------------------
+            # Determine whether this file needs reindexing.
+            # -------------------------------------------------
+
+            needs_code_reindex = indexer.needs_reindex(
+                relative_path_str,
+                stat.st_size,
+                modified_time,
             )
 
             needs_semantic_reindex = (
@@ -479,56 +475,36 @@ def index_repository() -> str:
                 skipped_files += 1
                 continue
 
+            # -------------------------------------------------
+            # Analyze source, build chunks, and generate
+            # embeddings before changing the database.
+            # -------------------------------------------------
+
             try:
-
-                # -------------------------------------------------
-                # Analyze source
-                # -------------------------------------------------
-
                 symbols = analyzer.analyze_file(
                     relative_path_str
                 )
 
-                references = (
-                    analyzer.find_references(
-                        relative_path_str
-                    )
+                references = analyzer.find_references(
+                    relative_path_str
                 )
 
-                dependencies = (
-                    analyzer.find_dependencies(
-                        relative_path_str
-                    )
+                dependencies = analyzer.find_dependencies(
+                    relative_path_str
                 )
-
-                # -------------------------------------------------
-                # Read source
-                # -------------------------------------------------
 
                 source_text = path.read_text(
                     encoding="utf-8"
                 )
 
-                # -------------------------------------------------
-                # Create semantic chunks
-                # -------------------------------------------------
-
-                chunks = (
-                    chunker.chunk_python_file(
-                        relative_path_str,
-                        source_text,
-                        symbols,
-                    )
+                chunks = chunker.chunk_python_file(
+                    relative_path_str,
+                    source_text,
+                    symbols,
                 )
 
-                # -------------------------------------------------
-                # Generate embeddings
-                # -------------------------------------------------
-
                 chunk_texts = [
-                    chunker.build_embedding_text(
-                        chunk
-                    )
+                    chunker.build_embedding_text(chunk)
                     for chunk in chunks
                 ]
 
@@ -540,9 +516,7 @@ def index_repository() -> str:
                     else []
                 )
 
-                if len(embeddings) != len(
-                    chunks
-                ):
+                if len(embeddings) != len(chunks):
                     raise RuntimeError(
                         "Embedding count does not match "
                         "semantic chunk count."
@@ -554,21 +528,12 @@ def index_repository() -> str:
                     chunks,
                     embeddings,
                 ):
-
                     semantic_chunk_records.append(
                         {
-                            "start_line": (
-                                chunk.start_line
-                            ),
-                            "end_line": (
-                                chunk.end_line
-                            ),
-                            "symbol_name": (
-                                chunk.symbol_name
-                            ),
-                            "symbol_type": (
-                                chunk.symbol_type
-                            ),
+                            "start_line": chunk.start_line,
+                            "end_line": chunk.end_line,
+                            "symbol_name": chunk.symbol_name,
+                            "symbol_type": chunk.symbol_type,
                             "content": chunk.content,
                             "embedding": embedding,
                         }
@@ -579,78 +544,73 @@ def index_repository() -> str:
                 UnicodeDecodeError,
                 OSError,
                 RuntimeError,
-            ):
+            ) as error:
                 embedding_errors += 1
+
+                file_failures.append(
+                    f"{relative_path_str} "
+                    f"({type(error).__name__})"
+                )
                 continue
 
             # -------------------------------------------------
-            # Persist normal index.
+            # Persist the complete file index atomically.
+            # Do not use the separate index_file(),
+            # index_references(), index_dependencies(),
+            # index_semantic_chunks(), or
+            # mark_semantic_indexed() calls here.
             # -------------------------------------------------
 
-            indexer.index_file(
-                relative_path=relative_path_str,
-                language="python",
-                size=stat.st_size,
-                modified_time=modified_time,
-                symbols=symbols,
-            )
+            try:
+                indexer.index_file_bundle(
+                    relative_path=relative_path_str,
+                    language="python",
+                    size=stat.st_size,
+                    modified_time=modified_time,
+                    symbols=symbols,
+                    references=references,
+                    dependencies=dependencies,
+                    semantic_chunks=semantic_chunk_records,
+                )
 
-            indexer.index_references(
-                relative_path=relative_path_str,
-                references=references,
-            )
+            except (
+                ValueError,
+                KeyError,
+                TypeError,
+                RuntimeError,
+            ) as error:
+                embedding_errors += 1
 
-            indexer.index_dependencies(
-                relative_path=relative_path_str,
-                dependencies=dependencies,
-            )
+                file_failures.append(
+                    f"{relative_path_str} "
+                    f"({type(error).__name__})"
+                )
+                continue
 
-            # -------------------------------------------------
-            # Persist semantic index.
-            # -------------------------------------------------
-
-            indexer.index_semantic_chunks(
-                relative_path=relative_path_str,
-                chunks=semantic_chunk_records,
-            )
-
-            indexer.mark_semantic_indexed(
-                relative_path_str
-            )
-
+            # Count only files whose complete index was committed.
             indexed_files += 1
             indexed_symbols += len(symbols)
             semantic_chunks_indexed += len(
                 semantic_chunk_records
             )
 
-        # ---------------------------------------------------------
-        # Remove deleted files.
-        # Cascading deletes remove their semantic chunks too.
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
+        # Remove files that no longer exist in the repository.
+        # -----------------------------------------------------
 
         with indexer._connect() as connection:
-
             rows = connection.execute(
                 "SELECT path FROM files"
             ).fetchall()
 
             indexed_paths = {
-                str(
-                    row["path"]
-                ).replace(
-                    "\\",
-                    "/",
-                )
+                str(row["path"]).replace("\\", "/")
                 for row in rows
             }
 
-            deleted_paths = (
-                indexed_paths - current_files
-            )
+            deleted_paths = indexed_paths - current_files
 
             for deleted_path in deleted_paths:
-
                 connection.execute(
                     """
                     DELETE FROM files
@@ -659,37 +619,52 @@ def index_repository() -> str:
                     (deleted_path,),
                 )
 
-            deleted_files = len(
-                deleted_paths
-            )
-
+            deleted_files = len(deleted_paths)
             connection.commit()
 
     finally:
         embedding_engine.close()
 
-    if (
-        indexed_files > 0
-        or deleted_files > 0
-    ):
+    # Invalidate cached retrieval results when the indexed
+    # repository contents have changed.
+    if indexed_files > 0 or deleted_files > 0:
         retrieval_cache.clear()
 
     stats = indexer.get_stats()
 
+    # ---------------------------------------------------------
+    # Build the final report.
+    # ---------------------------------------------------------
+
+    if file_failures:
+        status_line = (
+            "Repository indexing completed with file failures."
+        )
+
+        failure_summary = "\n".join(
+            f"  - {failure}"
+            for failure in file_failures
+        )
+    else:
+        status_line = "Repository indexed successfully."
+        failure_summary = "  None"
+
     return (
-        f"Repository indexed successfully.\n"
+        f"{status_line}\n"
         f"Files updated: {indexed_files}\n"
         f"Files skipped: {skipped_files}\n"
         f"Files deleted: {deleted_files}\n"
         f"Symbols indexed: {indexed_symbols}\n"
         f"Semantic chunks indexed: "
         f"{semantic_chunks_indexed}\n"
-        f"Semantic indexing errors: "
-        f"{embedding_errors}\n"
+        f"Semantic indexing errors: {embedding_errors}\n"
+        f"Files with errors: {len(file_failures)}\n"
+        f"Failure details:\n{failure_summary}\n"
         f"Semantic indexed files: "
         f"{stats['semantic_indexed_files']}\n"
         f"Database: {indexer.database_path}"
     )
+
 
 
 @mcp.tool()

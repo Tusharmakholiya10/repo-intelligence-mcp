@@ -355,6 +355,197 @@ class CodeIndexer:
 
             connection.commit()
 
+
+    def index_file_bundle(
+        self,
+        relative_path: str,
+        language: str,
+        size: int,
+        modified_time: str,
+        symbols: list[dict],
+        references: list[dict],
+        dependencies: list[dict],
+        semantic_chunks: list[dict],
+    ) -> None:
+        """
+        Atomically replace all indexed data for one file.
+
+        File metadata, symbols, references, dependencies,
+        semantic chunks, and semantic-index status are committed
+        together. Any failure rolls back the whole update.
+        """
+        relative_path = self._normalize_path(relative_path)
+
+        with self._connect() as connection:
+            # Create or update file metadata.
+            connection.execute(
+                """
+                INSERT INTO files (
+                    path, language, size, modified_time,
+                    semantic_indexed
+                )
+                VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(path)
+                DO UPDATE SET
+                    language = excluded.language,
+                    size = excluded.size,
+                    modified_time = excluded.modified_time,
+                    semantic_indexed = 0
+                """,
+                (
+                    relative_path,
+                    language,
+                    size,
+                    modified_time,
+                ),
+            )
+
+            file_row = connection.execute(
+                "SELECT id FROM files WHERE path = ?",
+                (relative_path,),
+            ).fetchone()
+
+            if file_row is None:
+                raise ValueError(
+                    f"File could not be indexed: {relative_path}"
+                )
+
+            file_id = file_row["id"]
+
+            # Replace data owned by this source file.
+            connection.execute(
+                "DELETE FROM symbols WHERE file_id = ?",
+                (file_id,),
+            )
+            connection.execute(
+                "DELETE FROM symbol_references WHERE file_id = ?",
+                (file_id,),
+            )
+            connection.execute(
+                "DELETE FROM dependencies WHERE source_file_id = ?",
+                (file_id,),
+            )
+            connection.execute(
+                "DELETE FROM semantic_chunks WHERE file_id = ?",
+                (file_id,),
+            )
+
+            # Insert symbols.
+            for symbol in symbols:
+                connection.execute(
+                    """
+                    INSERT INTO symbols (
+                        file_id, name, qualified_name, type,
+                        line, end_line
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        symbol["name"],
+                        symbol["qualified_name"],
+                        symbol["type"],
+                        symbol["line"],
+                        symbol["end_line"],
+                    ),
+                )
+
+            # Insert symbol references.
+            for reference in references:
+                connection.execute(
+                    """
+                    INSERT INTO symbol_references (
+                        file_id, symbol_name, line,
+                        reference_type
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        reference["symbol_name"],
+                        reference["line"],
+                        reference["reference_type"],
+                    ),
+                )
+
+            # Insert dependencies whose target files are indexed.
+            for dependency in dependencies:
+                target_path = self._normalize_path(
+                    dependency["target_file"]
+                )
+
+                target_row = connection.execute(
+                    "SELECT id FROM files WHERE path = ?",
+                    (target_path,),
+                ).fetchone()
+
+                # Preserve the existing behavior for targets
+                # that have not been indexed yet.
+                if target_row is None:
+                    continue
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO dependencies (
+                        source_file_id, target_file_id,
+                        dependency_type, line
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        target_row["id"],
+                        dependency["type"],
+                        dependency["line"],
+                    ),
+                )
+
+            # Insert semantic chunks and their embeddings.
+            for chunk in semantic_chunks:
+                embedding = chunk.get("embedding")
+
+                if not embedding:
+                    raise ValueError(
+                        "Semantic chunk is missing embedding."
+                    )
+
+                embedding_blob = self._serialize_embedding(
+                    embedding
+                )
+
+                connection.execute(
+                    """
+                    INSERT INTO semantic_chunks (
+                        file_id, start_line, end_line,
+                        symbol_name, symbol_type, content,
+                        embedding
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        chunk["start_line"],
+                        chunk["end_line"],
+                        chunk.get("symbol_name"),
+                        chunk.get("symbol_type"),
+                        chunk["content"],
+                        embedding_blob,
+                    ),
+                )
+
+            # Mark complete only within this transaction.
+            connection.execute(
+                """
+                UPDATE files
+                SET semantic_indexed = 1
+                WHERE id = ?
+                """,
+                (file_id,),
+            )
+
+            connection.commit()
+
+
     def needs_reindex(
         self,
         relative_path: str,
