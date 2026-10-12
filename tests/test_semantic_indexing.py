@@ -498,3 +498,151 @@ def test_file_bundle_update_rolls_back_on_failure(tmp_path):
         indexer.needs_semantic_reindex("example.py")
         is False
     )
+
+import sqlite3
+
+
+def test_database_write_failure_preserves_previous_file_bundle(
+    tmp_path,
+):
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+
+    source_file = repository_root / "example.py"
+    source_file.write_text(
+        "def old_function():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    indexer = CodeIndexer(repository_root)
+
+    old_symbol = {
+        "name": "old_function",
+        "qualified_name": "old_function",
+        "type": "function",
+        "line": 1,
+        "end_line": 2,
+    }
+
+    old_reference = {
+        "symbol_name": "old_function",
+        "line": 4,
+        "reference_type": "call",
+    }
+
+    old_chunk = {
+        "start_line": 1,
+        "end_line": 2,
+        "symbol_name": "old_function",
+        "symbol_type": "function",
+        "content": "def old_function(): return 1",
+        "embedding": [0.1, 0.2],
+    }
+
+    old_size = source_file.stat().st_size
+    old_modified_time = "2026-01-01T00:00:00"
+
+    indexer.index_file_bundle(
+        relative_path="example.py",
+        language="python",
+        size=old_size,
+        modified_time=old_modified_time,
+        symbols=[old_symbol],
+        references=[old_reference],
+        dependencies=[],
+        semantic_chunks=[old_chunk],
+    )
+
+    # Force SQLite to reject the new semantic chunk.
+    with indexer._connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_new_semantic_chunk
+            BEFORE INSERT ON semantic_chunks
+            WHEN NEW.content LIKE '%new_function%'
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated database failure');
+            END;
+            """
+        )
+
+    new_symbol = {
+        "name": "new_function",
+        "qualified_name": "new_function",
+        "type": "function",
+        "line": 1,
+        "end_line": 2,
+    }
+
+    new_chunk = {
+        "start_line": 1,
+        "end_line": 2,
+        "symbol_name": "new_function",
+        "symbol_type": "function",
+        "content": "def new_function(): return 2",
+        "embedding": [0.3, 0.4],
+    }
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="simulated database failure",
+    ):
+        indexer.index_file_bundle(
+            relative_path="example.py",
+            language="python",
+            size=old_size + 100,
+            modified_time="2026-01-02T00:00:00",
+            symbols=[new_symbol],
+            references=[],
+            dependencies=[],
+            semantic_chunks=[new_chunk],
+        )
+
+    # The previous symbols remain; the new symbol is absent.
+    old_symbols = indexer.search_symbols(
+        "old_function",
+        max_results=10,
+    )
+    assert any(
+        item["qualified_name"] == "old_function"
+        for item in old_symbols
+    )
+
+    assert indexer.search_symbols(
+        "new_function",
+        max_results=10,
+    ) == []
+
+    # The old references remain; no new references were committed.
+    assert indexer.find_usages(
+        "old_function",
+        max_results=10,
+    )
+    assert not indexer.find_usages(
+        "new_function",
+        max_results=10,
+    )
+
+    # The old semantic chunk remains intact.
+    chunks = indexer.get_semantic_chunks("example.py")
+    assert len(chunks) == 1
+    assert chunks[0]["content"] == old_chunk["content"]
+
+    # Failed persistence must not commit the new file metadata.
+    with indexer._connect() as connection:
+        file_row = connection.execute(
+            """
+            SELECT language, size, modified_time, semantic_indexed
+            FROM files
+            WHERE path = ?
+            """,
+            ("example.py",),
+        ).fetchone()
+
+    assert file_row is not None
+    assert file_row["language"] == "python"
+    assert file_row["size"] == old_size
+    assert file_row["modified_time"] == old_modified_time
+    assert file_row["semantic_indexed"] == 1
+
+    assert indexer.needs_semantic_reindex("example.py") is False
