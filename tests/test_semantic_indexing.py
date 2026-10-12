@@ -260,6 +260,63 @@ def test_deleted_file_removes_semantic_chunks(
 
     source_file.unlink()
 
+    # Add child records so deletion verifies every cascade relationship.
+    with indexer._connect() as connection:
+        file_row = connection.execute(
+            "SELECT id FROM files WHERE path = ?",
+            ("example.py",),
+        ).fetchone()
+        assert file_row is not None
+        file_id = file_row["id"]
+
+        connection.execute(
+            """
+            INSERT INTO symbols
+                (file_id, name, qualified_name, type, line, end_line)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (file_id, "hello", "hello", "function", 1, 1),
+        )
+
+        connection.execute(
+            """
+            INSERT INTO symbol_references
+                (file_id, symbol_name, line, reference_type)
+            VALUES (?, ?, ?, ?)
+            """,
+            (file_id, "hello", 2, "call"),
+        )
+
+        # Create a second file to verify dependency cleanup from
+        # both the source-file and target-file relationships.
+        connection.execute(
+            """
+            INSERT INTO files
+                (path, language, size, modified_time, semantic_indexed)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("other.py", "python", 10, "2026-01-01T00:00:00", 0),
+        )
+
+        other_row = connection.execute(
+            "SELECT id FROM files WHERE path = ?",
+            ("other.py",),
+        ).fetchone()
+        other_id = other_row["id"]
+
+        connection.executemany(
+            """
+            INSERT INTO dependencies
+                (source_file_id, target_file_id, dependency_type, line)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (file_id, other_id, "import", 1),
+                (other_id, file_id, "import", 2),
+            ],
+        )
+
+    # Existing deletion code, unchanged.
     with indexer._connect() as connection:
         connection.execute(
             """
@@ -276,6 +333,35 @@ def test_deleted_file_removes_semantic_chunks(
         )
         == []
     )
+
+    with indexer._connect() as connection:
+        remaining_symbols = connection.execute(
+            "SELECT COUNT(*) FROM symbols WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()[0]
+
+        remaining_references = connection.execute(
+            "SELECT COUNT(*) FROM symbol_references WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()[0]
+
+        remaining_dependencies = connection.execute(
+            """
+            SELECT COUNT(*) FROM dependencies
+            WHERE source_file_id = ? OR target_file_id = ?
+            """,
+            (file_id, file_id),
+        ).fetchone()[0]
+
+        remaining_chunks = connection.execute(
+            "SELECT COUNT(*) FROM semantic_chunks WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()[0]
+
+    assert remaining_symbols == 0
+    assert remaining_references == 0
+    assert remaining_dependencies == 0
+    assert remaining_chunks == 0
 
 
 def test_semantic_indexed_state_prevents_repeated_embedding(
