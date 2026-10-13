@@ -898,3 +898,113 @@ def test_reindex_replaces_stale_records_without_duplicates(tmp_path):
             assert count == 1, (
                 f"Expected exactly one row in {table}, got {count}"
             )
+
+def test_incoming_dependencies_survive_target_file_reindex(tmp_path):
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+
+    source_file = repository_root / "main.py"
+    target_file = repository_root / "helper.py"
+
+    source_file.write_text(
+        "import helper\n",
+        encoding="utf-8",
+    )
+    target_file.write_text(
+        "def old_function():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    indexer = CodeIndexer(repository_root)
+
+    # Index both files so the dependency target exists.
+    indexer.index_file_bundle(
+        relative_path="main.py",
+        language="python",
+        size=source_file.stat().st_size,
+        modified_time="2026-01-01T00:00:00",
+        symbols=[],
+        references=[],
+        dependencies=[],
+        semantic_chunks=[],
+    )
+
+    indexer.index_file_bundle(
+        relative_path="helper.py",
+        language="python",
+        size=target_file.stat().st_size,
+        modified_time="2026-01-01T00:00:00",
+        symbols=[],
+        references=[],
+        dependencies=[],
+        semantic_chunks=[],
+    )
+
+    # Store main.py -> helper.py.
+    indexer.index_dependencies(
+        "main.py",
+        [
+            {
+                "target_file": "helper.py",
+                "type": "import",
+                "line": 1,
+            }
+        ],
+    )
+
+    original_dependencies = indexer.get_dependencies("main.py")
+    assert len(original_dependencies) == 1
+    assert original_dependencies[0]["path"] == "helper.py"
+
+    # Update helper.py without changing its identity in the index.
+    target_file.write_text(
+        "def new_function():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    indexer.index_file_bundle(
+        relative_path="helper.py",
+        language="python",
+        size=target_file.stat().st_size,
+        modified_time="2026-01-02T00:00:00",
+        symbols=[],
+        references=[],
+        dependencies=[],
+        semantic_chunks=[],
+    )
+
+    # An incoming dependency should remain valid after a target update.
+    updated_dependencies = indexer.get_dependencies("main.py")
+    assert len(updated_dependencies) == 1
+    assert updated_dependencies[0]["path"] == "helper.py"
+
+    # Reindexing main.py's dependency list must not create duplicates.
+    indexer.index_dependencies(
+        "main.py",
+        [
+            {
+                "target_file": "helper.py",
+                "type": "import",
+                "line": 1,
+            }
+        ],
+    )
+
+    assert len(indexer.get_dependencies("main.py")) == 1
+
+    with indexer._connect() as connection:
+        dependency_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM dependencies
+            WHERE source_file_id = (
+                SELECT id FROM files WHERE path = ?
+            )
+            AND target_file_id = (
+                SELECT id FROM files WHERE path = ?
+            )
+            """,
+            ("main.py", "helper.py"),
+        ).fetchone()[0]
+
+    assert dependency_count == 1
