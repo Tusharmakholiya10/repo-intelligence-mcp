@@ -732,3 +732,169 @@ def test_database_write_failure_preserves_previous_file_bundle(
     assert file_row["semantic_indexed"] == 1
 
     assert indexer.needs_semantic_reindex("example.py") is False
+
+
+def test_reindex_replaces_stale_records_without_duplicates(tmp_path):
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+
+    source_file = repository_root / "example.py"
+    source_file.write_text(
+        "def old_function():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    indexer = CodeIndexer(repository_root)
+
+    old_symbol = {
+        "name": "old_function",
+        "qualified_name": "old_function",
+        "type": "function",
+        "line": 1,
+        "end_line": 2,
+    }
+
+    old_reference = {
+        "symbol_name": "old_function",
+        "line": 4,
+        "reference_type": "call",
+    }
+
+    old_chunk = {
+        "start_line": 1,
+        "end_line": 2,
+        "symbol_name": "old_function",
+        "symbol_type": "function",
+        "content": "def old_function(): return 1",
+        "embedding": [0.1, 0.2],
+    }
+
+    # Index the original file bundle.
+    indexer.index_file_bundle(
+        relative_path="example.py",
+        language="python",
+        size=source_file.stat().st_size,
+        modified_time="2026-01-01T00:00:00",
+        symbols=[old_symbol],
+        references=[old_reference],
+        dependencies=[],
+        semantic_chunks=[old_chunk],
+    )
+
+    new_symbol = {
+        "name": "new_function",
+        "qualified_name": "new_function",
+        "type": "function",
+        "line": 1,
+        "end_line": 2,
+    }
+
+    new_reference = {
+        "symbol_name": "new_function",
+        "line": 4,
+        "reference_type": "call",
+    }
+
+    new_chunk = {
+        "start_line": 1,
+        "end_line": 2,
+        "symbol_name": "new_function",
+        "symbol_type": "function",
+        "content": "def new_function(): return 2",
+        "embedding": [0.3, 0.4],
+    }
+
+    # Reindex the same file with updated records.
+    source_file.write_text(
+        "def new_function():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    def index_updated_bundle():
+        indexer.index_file_bundle(
+            relative_path="example.py",
+            language="python",
+            size=source_file.stat().st_size,
+            modified_time="2026-01-02T00:00:00",
+            symbols=[new_symbol],
+            references=[new_reference],
+            dependencies=[],
+            semantic_chunks=[new_chunk],
+        )
+
+    index_updated_bundle()
+
+    # Old symbol and reference must be removed.
+    assert indexer.search_symbols(
+        "old_function",
+        max_results=10,
+    ) == []
+
+    assert not indexer.find_usages(
+        "old_function",
+        max_results=10,
+    )
+
+    # New symbol and reference must exist.
+    new_symbols = indexer.search_symbols(
+        "new_function",
+        max_results=10,
+    )
+    assert sum(
+        item["qualified_name"] == "new_function"
+        for item in new_symbols
+    ) == 1
+
+    new_usages = indexer.find_usages(
+        "new_function",
+        max_results=10,
+    )
+    assert len(new_usages) == 1
+
+    chunks = indexer.get_semantic_chunks("example.py")
+    assert len(chunks) == 1
+    assert chunks[0]["content"] == new_chunk["content"]
+
+    # Repeating the same update must not create duplicate rows.
+    index_updated_bundle()
+
+    new_symbols = indexer.search_symbols(
+        "new_function",
+        max_results=10,
+    )
+    assert sum(
+        item["qualified_name"] == "new_function"
+        for item in new_symbols
+    ) == 1
+
+    assert len(
+        indexer.find_usages("new_function", max_results=10)
+    ) == 1
+
+    chunks = indexer.get_semantic_chunks("example.py")
+    assert len(chunks) == 1
+    assert chunks[0]["content"] == new_chunk["content"]
+
+    # Verify persistent row counts, not just search results.
+    with indexer._connect() as connection:
+        file_row = connection.execute(
+            "SELECT id FROM files WHERE path = ?",
+            ("example.py",),
+        ).fetchone()
+
+        assert file_row is not None
+        file_id = file_row["id"]
+
+        for table in (
+            "symbols",
+            "symbol_references",
+            "semantic_chunks",
+        ):
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()[0]
+
+            assert count == 1, (
+                f"Expected exactly one row in {table}, got {count}"
+            )
