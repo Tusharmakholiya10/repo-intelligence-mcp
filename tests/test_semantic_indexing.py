@@ -1008,3 +1008,104 @@ def test_incoming_dependencies_survive_target_file_reindex(tmp_path):
         ).fetchone()[0]
 
     assert dependency_count == 1
+
+
+def test_reindex_replaces_stale_outgoing_dependencies(
+    tmp_path,
+):
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+
+    source_file = repository_root / "main.py"
+    helper_file = repository_root / "helper.py"
+    utils_file = repository_root / "utils.py"
+
+    source_file.write_text(
+        "import helper\n",
+        encoding="utf-8",
+    )
+    helper_file.write_text(
+        "def help_function():\n    return 1\n",
+        encoding="utf-8",
+    )
+    utils_file.write_text(
+        "def utility_function():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    indexer = CodeIndexer(repository_root)
+
+    # Index all files first so both dependency targets exist.
+    for file_path in (
+        source_file,
+        helper_file,
+        utils_file,
+    ):
+        indexer.index_file_bundle(
+            relative_path=file_path.name,
+            language="python",
+            size=file_path.stat().st_size,
+            modified_time="2026-01-01T00:00:00",
+            symbols=[],
+            references=[],
+            dependencies=[],
+            semantic_chunks=[],
+        )
+
+    # Initially, main.py depends on helper.py.
+    indexer.index_file_bundle(
+        relative_path="main.py",
+        language="python",
+        size=source_file.stat().st_size,
+        modified_time="2026-01-01T00:00:00",
+        symbols=[],
+        references=[],
+        dependencies=[
+            {
+                "target_file": "helper.py",
+                "type": "import",
+                "line": 1,
+            }
+        ],
+        semantic_chunks=[],
+    )
+
+    initial_dependencies = indexer.get_dependencies(
+        "main.py"
+    )
+    assert [
+        dependency["path"]
+        for dependency in initial_dependencies
+    ] == ["helper.py"]
+
+    # The source now imports utils instead.
+    source_file.write_text(
+        "import utils\n",
+        encoding="utf-8",
+    )
+
+    indexer.index_file_bundle(
+        relative_path="main.py",
+        language="python",
+        size=source_file.stat().st_size,
+        modified_time="2026-01-02T00:00:00",
+        symbols=[],
+        references=[],
+        dependencies=[
+            {
+                "target_file": "utils.py",
+                "type": "import",
+                "line": 1,
+            }
+        ],
+        semantic_chunks=[],
+    )
+
+    updated_dependencies = indexer.get_dependencies(
+        "main.py"
+    )
+
+    assert [
+        dependency["path"]
+        for dependency in updated_dependencies
+    ] == ["utils.py"]
