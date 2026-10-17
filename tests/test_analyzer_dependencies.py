@@ -295,3 +295,36 @@ def test_find_dependencies_resolves_parent_package_import(
             "type": "from_import",
         }
     ]
+
+def test_find_dependencies_prefers_imported_module_in_package(
+    tmp_path: Path,
+):
+    package = tmp_path / "mypackage"
+    package.mkdir()
+
+    (package / "__init__.py").write_text(
+        "PACKAGE_INITIALIZED = True\n",
+        encoding="utf-8",
+    )
+    (package / "main.py").write_text(
+        "from mypackage import helper\n",
+        encoding="utf-8",
+    )
+    (package / "helper.py").write_text(
+        "HELPER_VALUE = 42\n",
+        encoding="utf-8",
+    )
+
+    analyzer = PythonAnalyzer(tmp_path)
+
+    dependencies = analyzer.find_dependencies(
+        "mypackage/main.py"
+    )
+
+    assert dependencies == [
+        {
+            "target_file": "mypackage/helper.py",
+            "line": 1,
+            "type": "from_import",
+        }
+    ]

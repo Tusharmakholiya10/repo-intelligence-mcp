@@ -601,7 +601,59 @@ class PythonAnalyzer:
                 continue
 
             # Absolute imports: resolve the module name directly.
+            
             target_file = self.resolve_import(module_name)
+
+            # For "from package import module", prefer the
+            # imported submodule when that file exists.
+            if (
+                item["type"] == "from_import"
+                and target_file is not None
+            ):
+                imported_names = self._get_relative_import_names(
+                    source_path,
+                    item["line"],
+                ) if item.get("level", 0) > 0 else []
+
+                if item.get("level", 0) == 0:
+                    source = source_path.read_text(
+                        encoding="utf-8"
+                    )
+                    tree = ast.parse(source)
+
+                    for node in ast.walk(tree):
+                        if (
+                            isinstance(node, ast.ImportFrom)
+                            and node.lineno == item["line"]
+                        ):
+                            imported_names = [
+                                alias.name
+                                for alias in node.names
+                                if alias.name != "*"
+                            ]
+                            break
+
+                package_module = module_name
+
+                for imported_name in imported_names:
+                    candidate = self.resolve_import(
+                        f"{package_module}.{imported_name}"
+                    )
+
+                    if candidate is not None:
+                        dependencies.append({
+                            "target_file": candidate,
+                            "line": item["line"],
+                            "type": item["type"],
+                        })
+
+                if imported_names and any(
+                    self.resolve_import(
+                        f"{package_module}.{name}"
+                    ) is not None
+                    for name in imported_names
+                ):
+                    continue
 
             if target_file is None:
                 continue
@@ -611,5 +663,6 @@ class PythonAnalyzer:
                 "line": item["line"],
                 "type": item["type"],
             })
+
 
         return dependencies
