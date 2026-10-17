@@ -154,7 +154,7 @@ class PythonAnalyzer:
                 })
 
             return
-        
+
     def search_symbols(
         self,
         query: str,
@@ -268,7 +268,7 @@ class PythonAnalyzer:
             )
 
         return path
-    
+
     def find_references(
         self,
         relative_path: str,
@@ -400,53 +400,45 @@ class PythonAnalyzer:
                     })
 
         return references
-    
+
     def find_imports(
         self,
         relative_path: str,
     ) -> list[dict]:
         """
-        Extract Python imports from a file.
+        Extract Python imports from a file, preserving relative-import
+        metadata so dependencies can be resolved in package context.
         """
+        path = self._resolve_python_file(relative_path)
 
-        path = self._resolve_python_file(
-            relative_path
-        )
-
-        source = path.read_text(
-            encoding="utf-8"
-        )
+        source = path.read_text(encoding="utf-8")
 
         try:
             tree = ast.parse(source)
         except SyntaxError as exc:
             raise ValueError(
                 f"Could not parse {relative_path}: {exc}"
-            )
+            ) from exc
 
         imports = []
 
         for node in ast.walk(tree):
-
             if isinstance(node, ast.Import):
-
                 for alias in node.names:
-
                     imports.append({
                         "module": alias.name,
                         "line": node.lineno,
                         "type": "import",
+                        "level": 0,
                     })
 
             elif isinstance(node, ast.ImportFrom):
-
-                if node.module:
-
-                    imports.append({
-                        "module": node.module,
-                        "line": node.lineno,
-                        "type": "from_import",
-                    })
+                imports.append({
+                    "module": node.module or "",
+                    "line": node.lineno,
+                    "type": "from_import",
+                    "level": node.level,
+                })
 
         return imports
 
@@ -459,6 +451,8 @@ class PythonAnalyzer:
         inside the configured repository.
         """
 
+        if not module_name or not module_name.strip():
+            return None
         parts = module_name.split(".")
         relative = Path(*parts)
 
@@ -493,25 +487,121 @@ class PythonAnalyzer:
 
         return None
 
+    def _get_relative_import_names(
+        self,
+        source_path: Path,
+        line_number: int,
+    ) -> list[str]:
+        """Return imported names for a relative import statement."""
+        source = source_path.read_text(encoding="utf-8")
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise ValueError(
+                f"Could not parse {source_path}: {exc}"
+            ) from exc
+
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.lineno == line_number
+                and node.level > 0
+            ):
+                return [
+                    alias.name
+                    for alias in node.names
+                    if alias.name != "*"
+                ]
+
+        return []
+
     def find_dependencies(
         self,
         relative_path: str,
     ) -> list[dict]:
         """
-        Find local repository files imported by a Python file.
+        Find local repository files imported by a Python file,
+        including relative imports.
         """
-
-        imports = self.find_imports(
-            relative_path
-        )
+        imports = self.find_imports(relative_path)
+        source_path = self._resolve_python_file(relative_path)
 
         dependencies = []
 
         for item in imports:
+            module_name = item["module"]
+            level = item.get("level", 0)
 
-            target_file = self.resolve_import(
-                item["module"]
-            )
+            if level > 0:
+                # Determine the package containing the source file.
+                source_dir = source_path.parent
+                package_parts = []
+
+                while (
+                    source_dir != self.repository_root
+                    and (source_dir / "__init__.py").is_file()
+                ):
+                    package_parts.insert(0, source_dir.name)
+                    source_dir = source_dir.parent
+
+                # Relative imports require a package context.
+                if not package_parts:
+                    continue
+
+                # One dot refers to the current package.
+                # Two dots refer to its parent, and so on.
+                ascend = level - 1
+
+                if ascend >= len(package_parts):
+                    continue
+
+                base_parts = package_parts[:len(package_parts) - ascend]
+
+                if module_name:
+                    base_parts.extend(module_name.split("."))
+
+                # For "from . import helper", resolve each imported
+                # name against the current package rather than its
+                # __init__.py file.
+                if not module_name:
+                    imported_names = self._get_relative_import_names(
+                        source_path,
+                        item["line"],
+                    )
+
+                    for imported_name in imported_names:
+                        candidate_module = ".".join(
+                            [*base_parts, imported_name]
+                        )
+                        candidate_file = self.resolve_import(
+                            candidate_module
+                        )
+
+                        if candidate_file:
+                            dependencies.append({
+                                "target_file": candidate_file,
+                                "line": item["line"],
+                                "type": item["type"],
+                            })
+
+                    continue
+
+                resolved_module = ".".join(base_parts)
+
+                target_file = self.resolve_import(resolved_module)
+
+                if target_file:
+                    dependencies.append({
+                        "target_file": target_file,
+                        "line": item["line"],
+                        "type": item["type"],
+                    })
+
+                continue
+
+            # Absolute imports: resolve the module name directly.
+            target_file = self.resolve_import(module_name)
 
             if target_file is None:
                 continue
