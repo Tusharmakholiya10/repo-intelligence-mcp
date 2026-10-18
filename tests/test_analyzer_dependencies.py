@@ -328,3 +328,40 @@ def test_find_dependencies_prefers_imported_module_in_package(
             "type": "from_import",
         }
     ]
+
+def test_find_dependencies_preserves_duplicate_import_occurrences(
+    tmp_path: Path,
+):
+    (tmp_path / "main.py").write_text(
+        "import helper\n"
+        "import helper\n"
+        "from helper import calculate\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "helper.py").write_text(
+        "def calculate():\n"
+        "    return 42\n",
+        encoding="utf-8",
+    )
+
+    analyzer = PythonAnalyzer(tmp_path)
+
+    dependencies = analyzer.find_dependencies("main.py")
+
+    assert dependencies == [
+        {
+            "target_file": "helper.py",
+            "line": 1,
+            "type": "import",
+        },
+        {
+            "target_file": "helper.py",
+            "line": 2,
+            "type": "import",
+        },
+        {
+            "target_file": "helper.py",
+            "line": 3,
+            "type": "from_import",
+        },
+    ]
