@@ -365,3 +365,69 @@ def test_find_dependencies_preserves_duplicate_import_occurrences(
             "type": "from_import",
         },
     ]
+
+def test_find_dependencies_resolves_nested_relative_import(
+    tmp_path: Path,
+):
+    package = tmp_path / "mypackage"
+    subpackage = package / "subpackage"
+    deep_package = subpackage / "deep"
+
+    deep_package.mkdir(parents=True)
+
+    for directory in (package, subpackage, deep_package):
+        (directory / "__init__.py").write_text(
+            "",
+            encoding="utf-8",
+        )
+
+    (deep_package / "main.py").write_text(
+        "from ... import helper\n",
+        encoding="utf-8",
+    )
+
+    (package / "helper.py").write_text(
+        "VALUE = 42\n",
+        encoding="utf-8",
+    )
+
+    analyzer = PythonAnalyzer(tmp_path)
+
+    dependencies = analyzer.find_dependencies(
+        "mypackage/subpackage/deep/main.py"
+    )
+
+    assert dependencies == [
+        {
+            "target_file": "mypackage/helper.py",
+            "line": 1,
+            "type": "from_import",
+        }
+    ]
+
+def test_find_dependencies_ignores_relative_import_beyond_package(
+    tmp_path: Path,
+):
+    package = tmp_path / "mypackage"
+    package.mkdir()
+
+    (package / "__init__.py").write_text(
+        "",
+        encoding="utf-8",
+    )
+    (package / "main.py").write_text(
+        "from .. import helper\n",
+        encoding="utf-8",
+    )
+    (package / "helper.py").write_text(
+        "VALUE = 42\n",
+        encoding="utf-8",
+    )
+
+    analyzer = PythonAnalyzer(tmp_path)
+
+    dependencies = analyzer.find_dependencies(
+        "mypackage/main.py"
+    )
+
+    assert dependencies == []
