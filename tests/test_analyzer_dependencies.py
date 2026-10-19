@@ -431,3 +431,32 @@ def test_find_dependencies_ignores_relative_import_beyond_package(
     )
 
     assert dependencies == []
+
+def test_find_dependencies_resolves_wildcard_package_import(
+    tmp_path: Path,
+):
+    package = tmp_path / "mypackage"
+    package.mkdir()
+
+    (package / "__init__.py").write_text(
+        "VALUE = 42\n",
+        encoding="utf-8",
+    )
+    (package / "main.py").write_text(
+        "from mypackage import *\n",
+        encoding="utf-8",
+    )
+
+    analyzer = PythonAnalyzer(tmp_path)
+
+    dependencies = analyzer.find_dependencies(
+        "mypackage/main.py"
+    )
+
+    assert dependencies == [
+        {
+            "target_file": "mypackage/__init__.py",
+            "line": 1,
+            "type": "from_import",
+        }
+    ]
