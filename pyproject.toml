@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp",
-    "pydantic-settings"
+    "pydantic-settings",
+    "google-genai"
 ]
 
 [project.optional-dependencies]
